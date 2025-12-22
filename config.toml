@@ -1,0 +1,59 @@
+# =============================================================================
+# vibepanel Configuration
+# =============================================================================
+#
+# Minimal starter config. For all available options, see:
+# https://github.com/prankstr/vibepanel/blob/main/docs/configuration.md
+#
+# Commands:
+#   vibepanel --check-config         Validate configuration
+#   vibepanel --print-example-config Print this example config
+#
+# =============================================================================
+
+[bar]
+size = 32
+border_radius = 30
+
+[widgets]
+left = ["workspace", "window_title"]
+center = []
+right = [
+  "system_tray",
+  "updates",
+  "cpu",
+  "quick_settings",
+  "battery",
+  "clock",
+  "notifications",
+]
+border_radius = 40
+
+# Per-widget options use [widgets.<name>] sections.
+# Example:
+#   [widgets.clock]
+#   format = "%H:%M"
+#
+#   [widgets.battery]
+#   disabled = true
+#
+# See documentation for all widget options.
+
+[icons]
+theme = "material"  # "material" or "gtk"
+
+[workspace]
+backend = "auto"  # "auto", "hyprland", "niri", "mango"
+
+[theme]
+mode = "dark"        # "auto", "dark", "light", "gtk"
+accent = "#adabe0"   # "gtk", "none", or hex color
+bar_opacity = 0.0    # 0.0 = transparent (islands), 1.0 = solid
+widget_opacity = 1.0
+
+[osd]
+enabled = true
+position = "bottom"  # "bottom", "top", "left", "right"
+
+# Custom CSS: place style.css in same directory as this file.
+# See documentation for available CSS variables and classes.

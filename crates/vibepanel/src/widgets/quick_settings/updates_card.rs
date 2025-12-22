@@ -1,0 +1,399 @@
+//! Updates card for Quick Settings panel.
+//!
+//! This module contains:
+//! - Updates card state
+//! - Card building with expandable details
+//! - Update list population
+//! - Refresh and upgrade button handlers
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Duration;
+
+use gtk4::glib::{self, SourceId};
+use gtk4::pango::{EllipsizeMode, WrapMode};
+use gtk4::prelude::*;
+use gtk4::{Box as GtkBox, Button, Label, Orientation, PolicyType, Revealer, ScrolledWindow};
+use tracing::debug;
+
+use super::components::ToggleCard;
+use super::ui_helpers::{
+    AccordionManager, ExpandableCard, ExpandableCardBase, build_scan_button, clear_list_box,
+    create_qs_list_box, set_icon_active, set_subtitle_active,
+};
+use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::updates::{UpdatesService, UpdatesSnapshot};
+use crate::styles::{color, qs, row, state};
+use crate::widgets::updates_common::{
+    format_last_check, format_repo_summary, icon_for_state, spawn_upgrade_terminal,
+};
+
+/// State for the Updates card in the Quick Settings panel.
+pub struct UpdatesCardState {
+    /// Common expandable card state (toggle, icon, subtitle, list_box, revealer, arrow).
+    pub base: ExpandableCardBase,
+    /// Refresh button.
+    pub refresh_button: RefCell<Option<Button>>,
+    /// Refresh button label (for animation).
+    pub refresh_label: RefCell<Option<Label>>,
+    /// Last check label in the details.
+    pub last_check_label: RefCell<Option<Label>>,
+    /// Animation timer source.
+    pub anim_source: RefCell<Option<SourceId>>,
+    /// Animation step counter.
+    pub anim_step: Cell<u8>,
+}
+
+impl UpdatesCardState {
+    pub fn new() -> Self {
+        Self {
+            base: ExpandableCardBase::new(),
+            refresh_button: RefCell::new(None),
+            refresh_label: RefCell::new(None),
+            last_check_label: RefCell::new(None),
+            anim_source: RefCell::new(None),
+            anim_step: Cell::new(0),
+        }
+    }
+}
+
+impl Default for UpdatesCardState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for UpdatesCardState {
+    fn drop(&mut self) {
+        // Cancel any active animation timer
+        if let Some(source_id) = self.anim_source.borrow_mut().take() {
+            source_id.remove();
+            debug!("UpdatesCardState: animation timer cancelled on drop");
+        }
+    }
+}
+
+impl ExpandableCard for UpdatesCardState {
+    fn base(&self) -> &ExpandableCardBase {
+        &self.base
+    }
+}
+
+/// Build the Updates card and revealer for the Quick Settings panel.
+pub fn build_updates_card(
+    state: &Rc<UpdatesCardState>,
+    accordion: &Rc<AccordionManager>,
+) -> (GtkBox, Revealer) {
+    let snapshot = UpdatesService::global().snapshot();
+
+    let subtitle_text = format_repo_summary(&snapshot);
+    let icon_name = icon_for_state(&snapshot);
+    let has_updates = snapshot.update_count > 0;
+
+    let card = ToggleCard::builder()
+        .icon(icon_name)
+        .label("Updates")
+        .subtitle(&subtitle_text)
+        .active(has_updates)
+        .sensitive(snapshot.available)
+        .icon_active(has_updates)
+        .with_expander(true)
+        .build();
+
+    // Store references
+    *state.base.toggle.borrow_mut() = Some(card.toggle.clone());
+    *state.base.card_icon.borrow_mut() = Some(card.icon_handle.clone());
+    *state.base.subtitle.borrow_mut() = card.subtitle.clone();
+    *state.base.arrow.borrow_mut() = card.expander_icon.clone();
+
+    // Connect toggle handler - opens terminal with upgrade command
+    {
+        let toggle = card.toggle.clone();
+        toggle.connect_toggled(move |toggle| {
+            // Only act on activation, not deactivation
+            if toggle.is_active() {
+                let snapshot = UpdatesService::global().snapshot();
+                if let Some(pm) = snapshot.package_manager
+                    && let Err(e) = spawn_upgrade_terminal(pm, None)
+                {
+                    tracing::error!("Failed to spawn upgrade terminal: {}", e);
+                }
+                // Reset toggle state (it's not a persistent toggle)
+                toggle.set_active(false);
+            }
+        });
+    }
+
+    // Build revealer with details
+    let revealer = Revealer::new();
+    revealer.set_reveal_child(false);
+    revealer.set_transition_type(gtk4::RevealerTransitionType::SlideDown);
+
+    let details = build_updates_details(state);
+    revealer.set_child(Some(&details.container));
+
+    *state.base.revealer.borrow_mut() = Some(revealer.clone());
+
+    // Register with accordion and set up expander behavior
+    accordion.register(Rc::clone(state));
+    if let Some(ref expander_btn) = card.expander_button {
+        AccordionManager::setup_expander(accordion, state, expander_btn);
+    }
+
+    (card.card, revealer)
+}
+
+/// Result of building updates details section.
+pub struct UpdatesDetailsResult {
+    pub container: GtkBox,
+}
+
+/// Build the updates details section with refresh button and update list.
+pub fn build_updates_details(state: &Rc<UpdatesCardState>) -> UpdatesDetailsResult {
+    let container = GtkBox::new(Orientation::Vertical, 4);
+    container.add_css_class(qs::UPDATES_DETAILS);
+    container.set_margin_top(4);
+
+    // Top row: refresh button on left, last check on right
+    let top_row = GtkBox::new(Orientation::Horizontal, 8);
+
+    // Refresh button (styled like wifi/bluetooth scan button)
+    let scan_result = build_scan_button("Refresh");
+    let refresh_btn = scan_result.button;
+    let refresh_label = scan_result.label;
+
+    {
+        refresh_btn.connect_clicked(move |_| {
+            debug!("Updates: refresh button clicked");
+            UpdatesService::global().refresh();
+        });
+    }
+
+    top_row.append(&refresh_btn);
+    *state.refresh_button.borrow_mut() = Some(refresh_btn);
+    *state.refresh_label.borrow_mut() = Some(refresh_label);
+
+    // Last check label (right side)
+    let last_check_label = Label::new(None);
+    last_check_label.add_css_class(qs::UPDATES_LAST_CHECK);
+    last_check_label.add_css_class(row::QS_SUBTITLE);
+    last_check_label.add_css_class(color::MUTED);
+    last_check_label.set_hexpand(true);
+    last_check_label.set_xalign(1.0);
+    top_row.append(&last_check_label);
+    *state.last_check_label.borrow_mut() = Some(last_check_label);
+
+    container.append(&top_row);
+
+    // Scrolled window for update list
+    let scrolled = ScrolledWindow::new();
+    scrolled.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scrolled.set_max_content_height(200);
+    scrolled.set_propagate_natural_height(true);
+    scrolled.add_css_class(qs::UPDATES_SCROLL);
+
+    let list_box = create_qs_list_box();
+    list_box.add_css_class(qs::UPDATES_LIST);
+    scrolled.set_child(Some(&list_box));
+    container.append(&scrolled);
+
+    *state.base.list_box.borrow_mut() = Some(list_box.clone());
+
+    // Populate initial state
+    let snapshot = UpdatesService::global().snapshot();
+    populate_updates_list(state, &snapshot);
+
+    UpdatesDetailsResult { container }
+}
+
+/// Handle updates snapshot changes.
+pub fn on_updates_changed(state: &UpdatesCardState, snapshot: &UpdatesSnapshot) {
+    // Update card icon
+    if let Some(icon) = state.base.card_icon.borrow().as_ref() {
+        let icon_name = icon_for_state(snapshot);
+        icon.set_icon(icon_name);
+        set_icon_active(icon, snapshot.update_count > 0);
+    }
+
+    // Update subtitle
+    if let Some(subtitle) = state.base.subtitle.borrow().as_ref() {
+        let text = format_repo_summary(snapshot);
+        subtitle.set_label(&text);
+        subtitle.set_visible(!text.is_empty());
+        set_subtitle_active(subtitle, snapshot.update_count > 0);
+    }
+
+    // Update toggle sensitivity
+    if let Some(toggle) = state.base.toggle.borrow().as_ref() {
+        // Toggle is sensitive when updates are available (so you can upgrade)
+        toggle.set_sensitive(snapshot.available && snapshot.update_count > 0);
+        // Don't keep it active - it's a momentary action
+        toggle.set_active(false);
+    }
+
+    // Update refresh button label and animation
+    update_refresh_ui(state, snapshot);
+
+    // Update last check label
+    if let Some(label) = state.last_check_label.borrow().as_ref() {
+        let text = format!("Last check: {}", format_last_check(snapshot.last_check));
+        label.set_label(&text);
+    }
+
+    // Update list
+    populate_updates_list(state, snapshot);
+    // Apply Pango font attrs to dynamically created list rows
+    if let Some(list_box) = state.base.list_box.borrow().as_ref() {
+        SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
+    }
+}
+
+/// Update the refresh button UI and animate while checking.
+fn update_refresh_ui(state: &UpdatesCardState, snapshot: &UpdatesSnapshot) {
+    let checking = snapshot.checking;
+
+    // Update label text and CSS
+    if let Some(label) = state.refresh_label.borrow().as_ref() {
+        if checking {
+            label.add_css_class(state::SCANNING);
+        } else {
+            label.set_label("Refresh");
+            label.remove_css_class(state::SCANNING);
+        }
+    }
+
+    // Update button sensitivity
+    if let Some(button) = state.refresh_button.borrow().as_ref() {
+        button.set_sensitive(!checking && snapshot.available);
+    }
+
+    // Manage animation timeout
+    let mut source_opt = state.anim_source.borrow_mut();
+    if checking {
+        if source_opt.is_none() {
+            // Start a simple dot animation: "Checking", "Checking.", ...
+            let step_cell = state.anim_step.clone();
+            let label_weak = state.refresh_label.borrow().as_ref().map(|l| l.downgrade());
+
+            if let Some(label_weak) = label_weak {
+                let source_id = glib::timeout_add_local(Duration::from_millis(450), move || {
+                    if let Some(label) = label_weak.upgrade() {
+                        let step = step_cell.get().wrapping_add(1) % 4;
+                        step_cell.set(step);
+                        let dots = match step {
+                            1 => ".",
+                            2 => "..",
+                            3 => "...",
+                            _ => "",
+                        };
+                        label.set_label(&format!("Checking{}", dots));
+                        glib::ControlFlow::Continue
+                    } else {
+                        glib::ControlFlow::Break
+                    }
+                });
+                *source_opt = Some(source_id);
+            }
+        }
+    } else if let Some(id) = source_opt.take() {
+        id.remove();
+        state.anim_step.set(0);
+    }
+}
+
+/// Populate the updates list from a snapshot.
+fn populate_updates_list(state: &UpdatesCardState, snapshot: &UpdatesSnapshot) {
+    let Some(list_box) = state.base.list_box.borrow().as_ref().cloned() else {
+        return;
+    };
+
+    clear_list_box(&list_box);
+
+    // Handle error state
+    if let Some(ref error) = snapshot.error {
+        let row = create_message_row(&format!("Error: {}", error));
+        row.add_css_class(qs::UPDATES_ERROR);
+        list_box.append(&row);
+        return;
+    }
+
+    // Handle checking state
+    if snapshot.checking && snapshot.update_count == 0 {
+        let row = create_message_row("Checking for updates...");
+        list_box.append(&row);
+        return;
+    }
+
+    // Handle no updates
+    if snapshot.update_count == 0 {
+        let row = create_message_row("System is up to date");
+        list_box.append(&row);
+        return;
+    }
+
+    // Build a single text block with all packages grouped by repo
+    let mut repos: Vec<_> = snapshot.updates_by_repo.iter().collect();
+    repos.sort_by_key(|(name, _)| *name);
+
+    for (repo, updates) in repos {
+        // Collect all package names, one per line
+        let pkg_names: Vec<&str> = updates.iter().map(|u| u.name.as_str()).collect();
+        let pkg_list = pkg_names.join("\n");
+
+        // Repo as title, packages as wrapping subtitle
+        let title = format!("{} ({})", repo, updates.len());
+        let row = create_updates_row(&title, &pkg_list);
+        list_box.append(&row);
+    }
+}
+
+/// Create a simple message row.
+fn create_message_row(text: &str) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    row.add_css_class(row::QS);
+    row.add_css_class(row::BASE);
+    row.set_activatable(false);
+
+    let label = Label::new(Some(text));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    label.set_wrap_mode(WrapMode::WordChar);
+    label.add_css_class(row::QS_TITLE);
+    label.add_css_class(color::PRIMARY);
+    row.set_child(Some(&label));
+    row
+}
+
+/// Create an updates row with a wrapping subtitle for package names.
+fn create_updates_row(title: &str, packages: &str) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    row.add_css_class(row::QS);
+    row.add_css_class(row::BASE);
+    row.set_activatable(false);
+
+    let vbox = GtkBox::new(Orientation::Vertical, 2);
+    vbox.add_css_class(row::QS_CONTENT);
+
+    // Title with ellipsis to prevent long repo names from expanding the window
+    let title_label = Label::new(Some(title));
+    title_label.set_xalign(0.0);
+    title_label.set_hexpand(true);
+    title_label.set_ellipsize(EllipsizeMode::End);
+    title_label.add_css_class(row::QS_TITLE);
+    title_label.add_css_class(color::PRIMARY);
+    vbox.append(&title_label);
+
+    // Package names wrap within the available width
+    let pkg_label = Label::new(Some(packages));
+    pkg_label.set_xalign(0.0);
+    pkg_label.set_hexpand(true);
+    pkg_label.set_wrap(true);
+    pkg_label.set_wrap_mode(WrapMode::WordChar);
+    pkg_label.add_css_class(row::QS_SUBTITLE);
+    pkg_label.add_css_class(color::MUTED);
+    vbox.append(&pkg_label);
+
+    row.set_child(Some(&vbox));
+    row
+}
