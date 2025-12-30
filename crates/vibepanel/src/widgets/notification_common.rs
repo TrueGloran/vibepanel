@@ -52,14 +52,26 @@ pub fn format_timestamp(timestamp: f64) -> String {
 }
 
 /// Truncate notification body text for display.
+/// Uses character count (not byte count) to handle UTF-8 properly.
 pub fn truncate_body(body: &str, max_chars: usize) -> String {
     let text = body.replace('\n', " ");
     let text = text.trim();
-    if text.len() > max_chars {
-        format!("{}...", &text[..max_chars])
+    if text.chars().count() > max_chars {
+        let truncated: String = text.chars().take(max_chars).collect();
+        format!("{}...", truncated)
     } else {
         text.to_string()
     }
+}
+
+/// Find the byte index for the nth character in a string.
+/// Returns the byte index where the nth character starts, or the string length
+/// if there are fewer than n characters.
+pub fn char_boundary(s: &str, char_index: usize) -> usize {
+    s.char_indices()
+        .nth(char_index)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
 }
 
 /// Create an Image widget for a notification, preferring avatar data

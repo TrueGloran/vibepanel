@@ -20,7 +20,7 @@ use crate::styles::{button, card, color, notification as notif, surface};
 
 use super::notification_common::{
     BODY_TRUNCATE_THRESHOLD, POPOVER_MAX_VISIBLE_ROWS, POPOVER_ROW_HEIGHT, POPOVER_WIDTH,
-    create_notification_image_widget, format_timestamp,
+    char_boundary, create_notification_image_widget, format_timestamp,
 };
 
 /// Callback type for closing the popover from within the content.
@@ -331,17 +331,20 @@ fn build_notification_row(
     if !notification.body.is_empty() {
         let body_clean = notification.body.replace('\n', " ");
         let body_clean = body_clean.trim();
-        let needs_expansion = body_clean.len() > BODY_TRUNCATE_THRESHOLD;
+        let needs_expansion = body_clean.chars().count() > BODY_TRUNCATE_THRESHOLD;
 
         if needs_expansion {
             // Expandable body: show truncated text, reveal continuation below
             let body_container = GtkBox::new(Orientation::Vertical, 0);
             body_container.add_css_class(notif::BODY_CONTAINER);
 
+            // Find the byte boundary for the truncation point (UTF-8 safe)
+            let split_byte_idx = char_boundary(body_clean, BODY_TRUNCATE_THRESHOLD);
+
             // First-line stack: collapsed (with ellipsis) vs expanded (without ellipsis)
             let first_line_stack = GtkBox::new(Orientation::Vertical, 0);
 
-            let collapsed_text = format!("{}…", &body_clean[..BODY_TRUNCATE_THRESHOLD]);
+            let collapsed_text = format!("{}…", &body_clean[..split_byte_idx]);
             let collapsed_label = Label::new(Some(&collapsed_text));
             collapsed_label.add_css_class(notif::BODY);
             collapsed_label.add_css_class(notif::BODY_TRUNCATED);
@@ -350,7 +353,7 @@ fn build_notification_row(
             collapsed_label.set_wrap(true);
             collapsed_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
 
-            let expanded_first_text = &body_clean[..BODY_TRUNCATE_THRESHOLD];
+            let expanded_first_text = &body_clean[..split_byte_idx];
             let expanded_first_label = Label::new(Some(expanded_first_text));
             expanded_first_label.add_css_class(notif::BODY);
             expanded_first_label.add_css_class(color::MUTED);
@@ -363,7 +366,7 @@ fn build_notification_row(
             first_line_stack.append(&expanded_first_label);
 
             // Continuation (the rest of the text) in a revealer
-            let continuation_text = &body_clean[BODY_TRUNCATE_THRESHOLD..];
+            let continuation_text = &body_clean[split_byte_idx..];
             let continuation_label = Label::new(Some(continuation_text));
             continuation_label.add_css_class(notif::BODY);
             continuation_label.add_css_class(color::MUTED);
