@@ -80,6 +80,8 @@ pub struct NetworkSnapshot {
     pub networks: Vec<WifiNetwork>,
     /// SSID currently being connected to (for loading state).
     pub connecting_ssid: Option<String>,
+    /// SSID that failed to connect (for re-showing password prompt).
+    pub failed_ssid: Option<String>,
 }
 
 impl NetworkSnapshot {
@@ -95,6 +97,7 @@ impl NetworkSnapshot {
             is_ready: false,
             networks: Vec::new(),
             connecting_ssid: None,
+            failed_ssid: None,
         }
     }
 }
@@ -119,7 +122,12 @@ enum NetworkUpdate {
     /// Request a network list refresh (from main thread context).
     RefreshNetworks,
     /// Connection attempt finished (success or failure).
-    ConnectionAttemptFinished,
+    ConnectionAttemptFinished {
+        /// The SSID that was attempted.
+        ssid: String,
+        /// Whether the connection succeeded.
+        success: bool,
+    },
 }
 
 /// Shared, process-wide network service for Wi-Fi state and control.
@@ -144,6 +152,8 @@ pub struct NetworkService {
     known_ssids_last_refresh: Arc<Mutex<Option<Instant>>>,
     /// SSID currently being connected to (cleared on success/failure).
     connecting_ssid: RefCell<Option<String>>,
+    /// SSID that failed to connect (for re-showing password prompt).
+    failed_ssid: RefCell<Option<String>>,
 }
 
 impl NetworkService {
@@ -160,6 +170,7 @@ impl NetworkService {
             known_ssids: Arc::new(Mutex::new(HashSet::new())),
             known_ssids_last_refresh: Arc::new(Mutex::new(None)),
             connecting_ssid: RefCell::new(None),
+            failed_ssid: RefCell::new(None),
         });
 
         // Initialize D-Bus connection.
@@ -240,26 +251,17 @@ impl NetworkService {
                     }
                 }
 
-                // Clear connecting_ssid if the target network is now connected
-                // or if connection attempt appears to have finished.
-                let connecting = self.connecting_ssid.borrow().clone();
-                if let Some(ref target_ssid) = connecting {
-                    let target_connected =
-                        networks.iter().any(|n| n.ssid == *target_ssid && n.active);
-                    if target_connected {
-                        // Connection succeeded
-                        *self.connecting_ssid.borrow_mut() = None;
-                    }
-                    // Note: We don't clear on failure here - the nmcli thread will
-                    // send another RefreshNetworks after the command completes,
-                    // and we'll clear it then via the ConnectionAttemptFinished update.
-                }
+                // Note: We do NOT clear connecting_ssid here based on net.active.
+                // NetworkManager may briefly show the network as active during the
+                // authentication phase, before authentication actually completes.
+                // We only clear connecting_ssid when ConnectionAttemptFinished arrives.
 
                 let mut snapshot = self.snapshot.borrow_mut();
                 snapshot.networks = networks;
                 snapshot.is_ready = true;
                 snapshot.scanning = self.scan_in_progress.get();
                 snapshot.connecting_ssid = self.connecting_ssid.borrow().clone();
+                snapshot.failed_ssid = self.failed_ssid.borrow().clone();
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
                 self.callbacks.notify(&snapshot_clone);
@@ -267,14 +269,31 @@ impl NetworkService {
             NetworkUpdate::RefreshNetworks => {
                 self.refresh_networks_async();
             }
-            NetworkUpdate::ConnectionAttemptFinished => {
-                // Clear connecting state and refresh network list.
+            NetworkUpdate::ConnectionAttemptFinished { ssid, success } => {
+                // Clear connecting state.
                 *self.connecting_ssid.borrow_mut() = None;
+
+                // If connection failed, set failed_ssid so UI can re-show password prompt.
+                // If succeeded, clear any previous failed_ssid.
+                if success {
+                    *self.failed_ssid.borrow_mut() = None;
+                } else {
+                    *self.failed_ssid.borrow_mut() = Some(ssid);
+                    // Invalidate the known SSIDs cache so we don't show "Saved"
+                    // for a network that failed to connect.
+                    *self
+                        .known_ssids_last_refresh
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
+                }
+
                 let mut snapshot = self.snapshot.borrow_mut();
                 snapshot.connecting_ssid = None;
+                snapshot.failed_ssid = self.failed_ssid.borrow().clone();
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
                 self.callbacks.notify(&snapshot_clone);
+
                 self.refresh_networks_async();
             }
         }
@@ -940,6 +959,16 @@ impl NetworkService {
         );
     }
 
+    /// Clear the failed connection state (called when user cancels password dialog).
+    pub fn clear_failed_state(&self) {
+        *self.failed_ssid.borrow_mut() = None;
+        let mut snapshot = self.snapshot.borrow_mut();
+        snapshot.failed_ssid = None;
+        let snapshot_clone = snapshot.clone();
+        drop(snapshot);
+        self.callbacks.notify(&snapshot_clone);
+    }
+
     /// Connect to a Wi-Fi network by SSID.
     pub fn connect_to_ssid(&self, ssid: &str, password: Option<&str>) {
         let ssid = ssid.trim().to_string();
@@ -947,9 +976,11 @@ impl NetworkService {
             return;
         }
 
-        // Set connecting state immediately for UI feedback.
+        // Clear any previous failed state and set connecting state for UI feedback.
+        *self.failed_ssid.borrow_mut() = None;
         *self.connecting_ssid.borrow_mut() = Some(ssid.clone());
         let mut snapshot = self.snapshot.borrow_mut();
+        snapshot.failed_ssid = None;
         snapshot.connecting_ssid = Some(ssid.clone());
         let snapshot_clone = snapshot.clone();
         drop(snapshot);
@@ -965,12 +996,34 @@ impl NetworkService {
                 cmd.args(["password", pw]);
             }
 
-            if let Err(e) = cmd.output() {
-                error!("nmcli connect failed: {}", e);
-            }
+            let success = match cmd.output() {
+                Ok(output) => {
+                    if output.status.success() {
+                        true
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        warn!("nmcli connect failed for '{}': {}", ssid, stderr.trim());
+
+                        // Delete the failed connection profile that nmcli created.
+                        // This prevents showing "Saved" for a network that never connected.
+                        let _ = Command::new("nmcli")
+                            .args(["connection", "delete", "id", &ssid])
+                            .output();
+
+                        false
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to run nmcli: {}", e);
+                    false
+                }
+            };
 
             // Signal that connection attempt finished (success or failure).
-            send_network_update(NetworkUpdate::ConnectionAttemptFinished);
+            send_network_update(NetworkUpdate::ConnectionAttemptFinished {
+                ssid,
+                success,
+            });
         });
     }
 

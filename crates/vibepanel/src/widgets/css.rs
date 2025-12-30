@@ -18,6 +18,7 @@ pub fn utility_css() -> String {
 .vp-primary { color: var(--color-foreground-primary); }
 .vp-muted { color: var(--color-foreground-muted); }
 .vp-accent { color: var(--color-accent-primary); }
+.vp-error { color: var(--color-state-urgent); }
 
 /* Popover header icon button - minimal styling for icon-only buttons in headers */
 .vp-popover-icon-btn {

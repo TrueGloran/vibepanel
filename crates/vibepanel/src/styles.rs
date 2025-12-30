@@ -82,6 +82,9 @@ pub mod color {
     /// Accent color (`.vp-accent`).
     pub const ACCENT: &str = "vp-accent";
 
+    /// Error/urgent color (`.vp-error`).
+    pub const ERROR: &str = "vp-error";
+
     /// Generic text class (`.text`).
     pub const TEXT: &str = "text";
 }
@@ -244,12 +247,6 @@ pub mod qs {
     /// Muted placeholder label (`.qs-muted`).
     pub const MUTED_LABEL: &str = "qs-muted";
 
-    /// Password row (`.qs-password-row`).
-    pub const PASSWORD_ROW: &str = "qs-password-row";
-
-    /// Password button (`.qs-password-button`).
-    pub const PASSWORD_BUTTON: &str = "qs-password-button";
-
     /// Audio row disabled state (`.qs-audio-row-disabled`).
     pub const AUDIO_ROW_DISABLED: &str = "qs-audio-row-disabled";
 
@@ -279,9 +276,6 @@ pub mod qs {
     pub const UPDATES_ERROR: &str = "qs-updates-error";
 
     // Wi-Fi card
-    /// Password inline container (`.qs-password-inline`).
-    pub const PASSWORD_INLINE: &str = "qs-password-inline";
-
     /// Wi-Fi network row (`.qs-wifi-row`).
     pub const WIFI_ROW: &str = "qs-wifi-row";
 

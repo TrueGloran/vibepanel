@@ -63,6 +63,29 @@ pub fn wifi_strength_icon(level: i32) -> &'static str {
     }
 }
 
+/// Find the QuickSettingsWindow by searching all toplevels.
+///
+/// Returns the QuickSettingsWindow if found and still alive, None otherwise.
+/// This searches through all application windows to find the one with
+/// the "vibepanel-qs-window" data attached.
+fn find_quick_settings_window() -> Option<Rc<super::window::QuickSettingsWindow>> {
+    for toplevel in gtk4::Window::list_toplevels() {
+        if let Ok(window) = toplevel.downcast::<ApplicationWindow>() {
+            // SAFETY: We store a Weak<QuickSettingsWindow> on the window at creation
+            // time with key "vibepanel-qs-window". upgrade() returns None if dropped.
+            unsafe {
+                if let Some(weak_ptr) =
+                    window.data::<Weak<super::window::QuickSettingsWindow>>("vibepanel-qs-window")
+                    && let Some(qs) = weak_ptr.as_ref().upgrade()
+                {
+                    return Some(qs);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// State for the Wi-Fi card in the Quick Settings panel.
 ///
 /// Uses `ExpandableCardBase` for common expandable card fields and adds
@@ -78,14 +101,24 @@ pub struct WifiCardState {
     pub password_box: RefCell<Option<GtkBox>>,
     /// Label in the password box.
     pub password_label: RefCell<Option<Label>>,
+    /// Error/status label in the password box (shows errors or "Connecting...").
+    pub password_error_label: RefCell<Option<Label>>,
     /// Password entry field.
     pub password_entry: RefCell<Option<Entry>>,
+    /// Cancel button in password box.
+    pub password_cancel_button: RefCell<Option<Button>>,
+    /// Connect button in password box.
+    pub password_connect_button: RefCell<Option<Button>>,
     /// Target SSID for the inline password prompt.
     pub password_target_ssid: RefCell<Option<String>>,
     /// Scan animation GLib source ID.
     pub scan_anim_source: RefCell<Option<glib::SourceId>>,
     /// Scan animation step counter.
     pub scan_anim_step: Cell<u8>,
+    /// Connect animation GLib source ID.
+    pub connect_anim_source: RefCell<Option<glib::SourceId>>,
+    /// Connect animation step counter.
+    pub connect_anim_step: Cell<u8>,
     /// Flag to prevent toggle signal handler from firing during programmatic updates.
     /// This prevents feedback loops when the service notifies us of state changes.
     pub updating_toggle: Cell<bool>,
@@ -99,10 +132,15 @@ impl WifiCardState {
             scan_label: RefCell::new(None),
             password_box: RefCell::new(None),
             password_label: RefCell::new(None),
+            password_error_label: RefCell::new(None),
             password_entry: RefCell::new(None),
+            password_cancel_button: RefCell::new(None),
+            password_connect_button: RefCell::new(None),
             password_target_ssid: RefCell::new(None),
             scan_anim_source: RefCell::new(None),
             scan_anim_step: Cell::new(0),
+            connect_anim_source: RefCell::new(None),
+            connect_anim_step: Cell::new(0),
             updating_toggle: Cell::new(false),
         }
     }
@@ -126,6 +164,11 @@ impl Drop for WifiCardState {
         if let Some(source_id) = self.scan_anim_source.borrow_mut().take() {
             source_id.remove();
             debug!("WifiCardState: scan animation timer cancelled on drop");
+        }
+        // Cancel any active connect animation timer
+        if let Some(source_id) = self.connect_anim_source.borrow_mut().take() {
+            source_id.remove();
+            debug!("WifiCardState: connect animation timer cancelled on drop");
         }
     }
 }
@@ -172,7 +215,6 @@ pub fn build_wifi_details(
 
     // Inline password prompt box (initially hidden, reused as a row child)
     let pwd_box = GtkBox::new(Orientation::Vertical, 6);
-    pwd_box.add_css_class(qs::PASSWORD_INLINE);
     pwd_box.set_visible(false);
 
     let pwd_label = Label::new(Some(""));
@@ -205,20 +247,29 @@ pub fn build_wifi_details(
 
     pwd_box.append(&pwd_entry);
 
-    let btn_row = GtkBox::new(Orientation::Horizontal, 4);
-    btn_row.set_halign(gtk4::Align::End);
+    // Button row: [status label (expands)] [cancel] [connect]
+    let btn_row = GtkBox::new(Orientation::Horizontal, 8);
+
+    // Status label (shows "Connecting..." or "Wrong password")
+    // Always visible but with empty text when idle - keeps buttons right-aligned
+    let pwd_status_label = Label::new(Some(""));
+    pwd_status_label.set_xalign(0.0);
+    pwd_status_label.set_hexpand(true);
+    btn_row.append(&pwd_status_label);
 
     let btn_cancel = Button::with_label("Cancel");
-    btn_cancel.add_css_class(qs::PASSWORD_BUTTON);
     let btn_ok = Button::with_label("Connect");
-    btn_ok.add_css_class(qs::PASSWORD_BUTTON);
+
+    // Apply Pango font attrs to fix text clipping on layer-shell surfaces
+    let style_mgr = SurfaceStyleManager::global();
+    style_mgr.apply_pango_attrs(&pwd_label);
+    style_mgr.apply_pango_attrs(&pwd_status_label);
 
     {
         let state_weak = Rc::downgrade(state);
-        let window_weak = window.clone();
         btn_cancel.connect_clicked(move |_| {
             if let Some(state) = state_weak.upgrade() {
-                on_password_cancel_clicked(&state, window_weak.clone());
+                on_password_cancel_clicked(&state);
             }
         });
     }
@@ -240,7 +291,10 @@ pub fn build_wifi_details(
     // Store password widgets for later use
     *state.password_box.borrow_mut() = Some(pwd_box.clone());
     *state.password_label.borrow_mut() = Some(pwd_label.clone());
+    *state.password_error_label.borrow_mut() = Some(pwd_status_label.clone());
     *state.password_entry.borrow_mut() = Some(pwd_entry.clone());
+    *state.password_cancel_button.borrow_mut() = Some(btn_cancel.clone());
+    *state.password_connect_button.borrow_mut() = Some(btn_ok.clone());
 
     // Populate with current network state
     let snapshot = NetworkService::global().snapshot();
@@ -256,6 +310,17 @@ pub fn build_wifi_details(
 
 /// Populate the Wi-Fi list with network data from snapshot.
 pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &NetworkSnapshot) {
+    // Unparent and unrealize the password box BEFORE clearing the list.
+    // This is critical: when clear_list_box removes rows, the password box would become
+    // orphaned but still realized. Then when we try to add it to a new row, GTK fails
+    // with "assertion failed: (!priv->realized)".
+    if let Some(pwd_box) = state.password_box.borrow().as_ref()
+        && pwd_box.parent().is_some()
+    {
+        pwd_box.unrealize();
+        pwd_box.unparent();
+    }
+
     clear_list_box(list_box);
 
     if !snapshot.is_ready {
@@ -287,7 +352,8 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
         if net.security != "open" {
             subtitle_parts.push("Secured".to_string());
         }
-        if net.known {
+        // Don't show "Saved" while connecting (nmcli creates profile before auth completes)
+        if net.known && !is_connecting {
             subtitle_parts.push("Saved".to_string());
         }
         subtitle_parts.push(format!("{}%", net.strength));
@@ -375,25 +441,9 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
                         .networks
                         .iter()
                         .any(|n| n.ssid == ssid && !n.known && n.security != "open")
+                        && let Some(qs) = find_quick_settings_window()
                     {
-                        // Look up the QuickSettingsWindow to show the inline password dialog.
-                        if let Some(window) = gtk4::Window::list_toplevels()
-                            .into_iter()
-                            .find_map(|w| w.downcast::<ApplicationWindow>().ok())
-                        {
-                            // SAFETY: We store a Weak<QuickSettingsWindow> on the window at creation
-                            // time with key "vibepanel-qs-window". upgrade() returns None if dropped.
-                            unsafe {
-                                if let Some(weak_ptr) =
-                                    window.data::<Weak<super::window::QuickSettingsWindow>>(
-                                        "vibepanel-qs-window",
-                                    )
-                                    && let Some(qs) = weak_ptr.as_ref().upgrade()
-                                {
-                                    qs.show_wifi_password_dialog(&ssid);
-                                }
-                            }
-                        }
+                        qs.show_wifi_password_dialog(&ssid);
                     }
                 }
             });
@@ -408,7 +458,6 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
             && let Some(pwd_box) = state.password_box.borrow().as_ref()
         {
             let pwd_row = ListBoxRow::new();
-            pwd_row.add_css_class(qs::PASSWORD_ROW);
             pwd_row.set_activatable(false);
             pwd_row.set_focusable(true);
             pwd_box.set_visible(true);
@@ -425,7 +474,6 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
         && let Some(pwd_box) = state.password_box.borrow().as_ref()
     {
         let pwd_row = ListBoxRow::new();
-        pwd_row.add_css_class(qs::PASSWORD_ROW);
         pwd_row.set_activatable(false);
         pwd_row.set_focusable(true);
         pwd_box.set_visible(true);
@@ -447,13 +495,20 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         // Single action: just "Connect" as accent-colored text
         let action_label = create_row_action_label("Connect");
         let ssid_clone = ssid.clone();
+        let is_secured = net.security != "open";
         let gesture = GestureClick::new();
         gesture.set_button(1);
         gesture.connect_pressed(move |_, _, _, _| {
-            let network = NetworkService::global();
-            // For unknown networks, try connecting without password first
-            // (password prompt handling would be done elsewhere if needed)
-            network.connect_to_ssid(&ssid_clone, None);
+            if is_secured {
+                // Secured, unknown network: show password prompt
+                if let Some(qs) = find_quick_settings_window() {
+                    qs.show_wifi_password_dialog(&ssid_clone);
+                }
+            } else {
+                // Open network: connect directly without password
+                let network = NetworkService::global();
+                network.connect_to_ssid(&ssid_clone, None);
+            }
         });
         action_label.add_controller(gesture);
         return action_label.upcast();
@@ -479,7 +534,12 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         // Connect / Disconnect actions
         if is_active_clone {
             let ssid_clone = ssid_for_actions.clone();
+            let popover_weak = popover.downgrade();
             let action = create_row_menu_action("Disconnect", move || {
+                // Close popover first to avoid "still has children" warning
+                if let Some(p) = popover_weak.upgrade() {
+                    p.popdown();
+                }
                 let network = NetworkService::global();
                 debug!("wifi_disconnect_from_menu ssid={}", ssid_clone);
                 network.disconnect();
@@ -487,13 +547,15 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
             content_box.append(&action);
         } else {
             let ssid_clone = ssid_for_actions.clone();
-            let is_known_inner = is_known_clone;
+            let popover_weak = popover.downgrade();
             let action = create_row_menu_action("Connect", move || {
+                // Close popover first to avoid "still has children" warning
+                if let Some(p) = popover_weak.upgrade() {
+                    p.popdown();
+                }
                 let network = NetworkService::global();
                 debug!("wifi_connect_from_menu ssid={}", ssid_clone);
-                // For known networks or open networks, connect without password
-                // Password prompt handling would be done elsewhere if needed
-                let _ = is_known_inner; // Kept for future password prompt logic
+                // Known networks connect without password prompt
                 network.connect_to_ssid(&ssid_clone, None);
             });
             content_box.append(&action);
@@ -502,7 +564,12 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         // Forget action for known networks
         if is_known_clone {
             let ssid_clone = ssid_for_actions.clone();
+            let popover_weak = popover.downgrade();
             let action = create_row_menu_action("Forget", move || {
+                // Close popover first to avoid "still has children" warning
+                if let Some(p) = popover_weak.upgrade() {
+                    p.popdown();
+                }
                 let network = NetworkService::global();
                 debug!("wifi_forget_from_menu ssid={}", ssid_clone);
                 network.forget_network(&ssid_clone);
@@ -511,7 +578,9 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         }
 
         panel.append(&content_box);
-        SurfaceStyleManager::global().apply_surface_styles(&panel, true);
+        let style_mgr = SurfaceStyleManager::global();
+        style_mgr.apply_surface_styles(&panel, true);
+        style_mgr.apply_pango_attrs_all(&content_box);
 
         popover.set_child(Some(&panel));
         popover.set_parent(btn);
@@ -528,7 +597,8 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
 }
 
 /// Show inline Wi-Fi password dialog for the given SSID.
-pub fn show_password_dialog(state: &WifiCardState, ssid: &str) {
+/// If `show_error` is true, displays "Wrong password" message.
+pub fn show_password_dialog_with_error(state: &WifiCardState, ssid: &str, show_error: bool) {
     let ssid = ssid.trim();
     if ssid.is_empty() {
         return;
@@ -540,6 +610,17 @@ pub fn show_password_dialog(state: &WifiCardState, ssid: &str) {
         label.set_label(&format!("Enter password for {}", ssid));
     }
 
+    // Show or clear the error label (always visible for layout, text controls display)
+    if let Some(error_label) = state.password_error_label.borrow().as_ref() {
+        if show_error {
+            error_label.add_css_class(color::ERROR);
+            error_label.set_label("Wrong password");
+        } else {
+            error_label.remove_css_class(color::ERROR);
+            error_label.set_label("");
+        }
+    }
+
     if let Some(entry) = state.password_entry.borrow().as_ref() {
         entry.set_text("");
     }
@@ -548,6 +629,11 @@ pub fn show_password_dialog(state: &WifiCardState, ssid: &str) {
         let snapshot = NetworkService::global().snapshot();
         populate_wifi_list(state, list_box, &snapshot);
     }
+}
+
+/// Show inline Wi-Fi password dialog for the given SSID.
+pub fn show_password_dialog(state: &WifiCardState, ssid: &str) {
+    show_password_dialog_with_error(state, ssid, false);
 }
 
 /// Called when the password entry is mapped; grabs focus if we have a target.
@@ -558,12 +644,27 @@ fn on_password_entry_mapped(state: &WifiCardState, entry: &Entry) {
 }
 
 /// Cancel the inline password prompt.
-fn on_password_cancel_clicked(state: &WifiCardState, _window: WeakRef<ApplicationWindow>) {
+fn on_password_cancel_clicked(state: &WifiCardState) {
+    hide_password_dialog(state);
+
+    // Clear any failed connection state so we don't re-show the dialog
+    NetworkService::global().clear_failed_state();
+}
+
+/// Hide the password dialog and reset its state.
+fn hide_password_dialog(state: &WifiCardState) {
     if let Some(entry) = state.password_entry.borrow().as_ref() {
         entry.set_text("");
     }
     if let Some(box_) = state.password_box.borrow().as_ref() {
         box_.set_visible(false);
+    }
+    // Reset connecting state (re-enable inputs, stop animation)
+    set_password_connecting_state(state, false, None);
+    // Clear status label
+    if let Some(error_label) = state.password_error_label.borrow().as_ref() {
+        error_label.remove_css_class(color::ERROR);
+        error_label.set_label("");
     }
     *state.password_target_ssid.borrow_mut() = None;
 
@@ -574,7 +675,7 @@ fn on_password_cancel_clicked(state: &WifiCardState, _window: WeakRef<Applicatio
 }
 
 /// Attempt to connect using the inline password prompt.
-fn on_password_connect_clicked(state: &WifiCardState, _window: WeakRef<ApplicationWindow>) {
+fn on_password_connect_clicked(state: &WifiCardState, window: WeakRef<ApplicationWindow>) {
     let ssid_opt = state.password_target_ssid.borrow().clone();
     let Some(ssid) = ssid_opt else {
         return;
@@ -590,21 +691,113 @@ fn on_password_connect_clicked(state: &WifiCardState, _window: WeakRef<Applicati
         return;
     }
 
+    // Show connecting state: disable inputs, start animation
+    set_password_connecting_state(state, true, Some(window));
+
     let service = NetworkService::global();
     service.connect_to_ssid(&ssid, Some(&password));
+}
 
-    if let Some(box_) = state.password_box.borrow().as_ref() {
-        box_.set_visible(false);
-    }
+/// Set the password dialog to connecting/idle state.
+/// When `connecting` is true, `window` must be provided to start the animation.
+/// When `connecting` is false, `window` can be None as we're just stopping.
+fn set_password_connecting_state(
+    state: &WifiCardState,
+    connecting: bool,
+    window: Option<WeakRef<ApplicationWindow>>,
+) {
     if let Some(entry) = state.password_entry.borrow().as_ref() {
-        entry.set_text("");
+        entry.set_sensitive(!connecting);
     }
-    *state.password_target_ssid.borrow_mut() = None;
+    if let Some(btn) = state.password_cancel_button.borrow().as_ref() {
+        btn.set_sensitive(!connecting);
+    }
+    if let Some(btn) = state.password_connect_button.borrow().as_ref() {
+        btn.set_sensitive(!connecting);
+    }
 
-    if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-        let snapshot = NetworkService::global().snapshot();
-        populate_wifi_list(state, list_box, &snapshot);
+    // Show "Connecting..." animation in the status label (same location as error)
+    let mut source_opt = state.connect_anim_source.borrow_mut();
+    if connecting {
+        // Show status label with initial text (remove error styling)
+        if let Some(label) = state.password_error_label.borrow().as_ref() {
+            label.remove_css_class(color::ERROR);
+            label.set_label("Connecting");
+        }
+
+        if source_opt.is_none()
+            && let Some(window) = window
+        {
+            // Start a simple dot animation: "Connecting", "Connecting.", ...
+            let step_cell = state.connect_anim_step.clone();
+            let source_id = glib::timeout_add_local(std::time::Duration::from_millis(450), {
+                move || {
+                    if let Some(window) = window.upgrade() {
+                        // SAFETY: We store a Weak<QuickSettingsWindow> on the window at creation
+                        // time with key "vibepanel-qs-window". upgrade() returns None if dropped.
+                        unsafe {
+                            if let Some(weak_ptr) = window
+                                .data::<Weak<super::window::QuickSettingsWindow>>(
+                                    "vibepanel-qs-window",
+                                )
+                                && let Some(qs) = weak_ptr.as_ref().upgrade()
+                                && let Some(label) =
+                                    qs.wifi.password_error_label.borrow().as_ref()
+                            {
+                                let step = step_cell.get().wrapping_add(1) % 4;
+                                step_cell.set(step);
+                                let dots = match step {
+                                    1 => ".",
+                                    2 => "..",
+                                    3 => "...",
+                                    _ => "",
+                                };
+                                label.set_label(&format!("Connecting{}", dots));
+                            }
+                        }
+                    }
+                    glib::ControlFlow::Continue
+                }
+            });
+            *source_opt = Some(source_id);
+        }
+    } else {
+        // Stop animation if running
+        if let Some(id) = source_opt.take() {
+            id.remove();
+            state.connect_anim_step.set(0);
+        }
+        // Clear status label (will be set to error text by caller if needed)
+        if let Some(label) = state.password_error_label.borrow().as_ref() {
+            label.remove_css_class(color::ERROR);
+            label.set_label("");
+        }
     }
+}
+
+/// Update the Wi-Fi subtitle based on connection state.
+pub fn update_subtitle(state: &WifiCardState, snapshot: &NetworkSnapshot) {
+    let subtitle_ref = state.base.subtitle.borrow();
+    let Some(label) = subtitle_ref.as_ref() else {
+        return;
+    };
+
+    let enabled = snapshot.wifi_enabled.unwrap_or(false);
+    let is_connecting = snapshot.connecting_ssid.is_some();
+
+    let subtitle = if is_connecting {
+        format!("Connecting to {}", snapshot.connecting_ssid.as_ref().unwrap())
+    } else if let Some(ref ssid) = snapshot.ssid {
+        ssid.clone()
+    } else if enabled {
+        "Enabled".to_string()
+    } else {
+        "Disabled".to_string()
+    };
+
+    let connected = snapshot.ssid.is_some() && !is_connecting;
+    label.set_label(&subtitle);
+    set_subtitle_active(label, enabled && connected);
 }
 
 /// Update the scan button UI and animate while scanning.
@@ -679,6 +872,38 @@ pub fn on_network_changed(
     snapshot: &NetworkSnapshot,
     window: &ApplicationWindow,
 ) {
+    // Handle password dialog state based on connection result
+    let current_target = state.password_target_ssid.borrow().clone();
+    if let Some(ref target_ssid) = current_target {
+        if let Some(ref failed_ssid) = snapshot.failed_ssid {
+            if failed_ssid == target_ssid {
+                // Connection failed for our target - show error and re-enable form
+                debug!("Connection failed for '{}', showing error", failed_ssid);
+                set_password_connecting_state(state, false, None);
+                if let Some(error_label) = state.password_error_label.borrow().as_ref() {
+                    error_label.add_css_class(color::ERROR);
+                    error_label.set_label("Wrong password");
+                }
+                // Clear the failed state so we don't re-trigger
+                NetworkService::global().clear_failed_state();
+            }
+        } else if snapshot.ssid.as_ref() == Some(target_ssid) && snapshot.connecting_ssid.is_none() {
+            // Successfully connected to target - hide dialog and clear state
+            debug!("Successfully connected to '{}', hiding password dialog", target_ssid);
+            hide_password_dialog(state);
+        }
+        // If connecting_ssid matches target, keep showing animation (do nothing)
+    } else if let Some(ref failed_ssid) = snapshot.failed_ssid {
+        // No dialog open but connection failed - show dialog with error if window is mapped
+        if window.is_mapped() {
+            debug!("Connection failed for '{}', showing password dialog with error", failed_ssid);
+            show_password_dialog_with_error(state, failed_ssid, true);
+        } else {
+            debug!("Connection failed for '{}', but window is closed - clearing failed state", failed_ssid);
+            NetworkService::global().clear_failed_state();
+        }
+    }
+
     // Update Wi-Fi toggle state (with signal blocking to prevent feedback loop)
     if let Some(toggle) = state.base.toggle.borrow().as_ref() {
         let enabled = snapshot.wifi_enabled.unwrap_or(false);
@@ -709,25 +934,20 @@ pub fn on_network_changed(
     }
 
     // Update Wi-Fi subtitle
-    if let Some(label) = state.base.subtitle.borrow().as_ref() {
-        let connected = snapshot.ssid.is_some();
-        let enabled = snapshot.wifi_enabled.unwrap_or(false);
-        let subtitle = if let Some(ref ssid) = snapshot.ssid {
-            ssid.clone()
-        } else if enabled {
-            "Enabled".to_string()
-        } else {
-            "Disabled".to_string()
-        };
-        label.set_label(&subtitle);
-        set_subtitle_active(label, enabled && connected);
-    }
+    update_subtitle(state, snapshot);
 
     // Update scan button UI (label + animation)
     update_scan_ui(state, snapshot, window);
 
-    // Update network list
-    if let Some(list_box) = state.base.list_box.borrow().as_ref() {
+    // Update network list - but skip if password dialog is visible to avoid layout shifts
+    let password_dialog_visible = state
+        .password_box
+        .borrow()
+        .as_ref()
+        .is_some_and(|b| b.is_visible());
+    if !password_dialog_visible
+        && let Some(list_box) = state.base.list_box.borrow().as_ref()
+    {
         populate_wifi_list(state, list_box, snapshot);
         // Apply Pango font attrs to dynamically created list rows
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
