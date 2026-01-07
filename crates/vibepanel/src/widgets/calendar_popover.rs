@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use chrono::{Datelike, Local, NaiveDate};
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Calendar, Label, Orientation, Widget};
+use gtk4::{Align, Box as GtkBox, Button, Calendar, Label, Orientation, Overlay, Widget};
 
 use crate::styles::{calendar as cal, surface};
 
@@ -12,7 +12,7 @@ use crate::styles::{calendar as cal, surface};
 /// Shows a month view calendar with custom previous/next navigation and a
 /// header label. Toggles a `show-today` CSS class when the currently viewed
 /// month matches the real current month.
-pub fn build_clock_calendar_popover() -> Widget {
+pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     // Today and tracked month/year (always using day = 1 so that
     // month arithmetic is simpler and avoids invalid dates like 31 Feb).
     let today: NaiveDate = Local::now().date_naive();
@@ -39,14 +39,37 @@ pub fn build_clock_calendar_popover() -> Widget {
     // Calendar widget
     let calendar = Calendar::new();
     calendar.set_show_heading(false);
-    calendar.set_show_week_numbers(true);
+    calendar.set_show_week_numbers(show_week_numbers);
     calendar.add_css_class(cal::WIDGET);
     calendar.add_css_class(cal::GRID);
-    calendar.set_halign(Align::Center);
+    calendar.set_halign(Align::Fill); // Fill the wrapper so left alignment works relative to it
     // Initially show today styling since we start in the current month
     calendar.add_css_class(cal::SHOW_TODAY);
 
-    container.append(&calendar);
+    // Wrapper to center the calendar+overlay in the popover
+    let wrapper = GtkBox::new(Orientation::Vertical, 0);
+    wrapper.set_halign(Align::Center);
+
+    if show_week_numbers {
+        // Week number header "w"
+        // We use an Overlay to position the "w" label precisely over the top-left corner
+        // of the calendar, aligning it with the week number column.
+        let overlay = Overlay::new();
+        overlay.set_child(Some(&calendar));
+
+        let w_label = Label::new(Some("w"));
+        w_label.add_css_class("week-number-header");
+        w_label.set_halign(Align::Start);
+        w_label.set_valign(Align::Start);
+
+        overlay.add_overlay(&w_label);
+        wrapper.append(&overlay);
+    } else {
+        // No week numbers, just append calendar directly
+        wrapper.append(&calendar);
+    }
+
+    container.append(&wrapper);
 
     // Helper closures --------------------------------------------------------
 

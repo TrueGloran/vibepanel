@@ -108,6 +108,7 @@ Configure individual widgets with `[widgets.<name>]` sections. All widgets suppo
 ```toml
 [widgets.clock]
 format = "%a %d %H:%M"   # strftime format (default: "Mon 21 14:30")
+show_week_numbers = false   # hide week numbers
 ```
 
 See [strftime.org](https://strftime.org) for format codes.
@@ -129,6 +130,7 @@ separator = ""           # Separator between indicators
 ```
 
 Label types:
+
 - `icons` - Symbols: `●` (active), `○` (occupied), `◆` (urgent)
 - `numbers` - Workspace names/numbers
 - `none` - Minimal (CSS-only styling)
@@ -146,6 +148,7 @@ uppercase = false         # Uppercase the title
 ```
 
 Template variables:
+
 - `{title}` - Raw window title
 - `{app_id}` - App ID from compositor
 - `{app}` - Friendly app name
@@ -208,6 +211,7 @@ format = "percentage"    # "percentage", "absolute", or "both"
 ```
 
 Format examples:
+
 - `percentage` - "76%"
 - `absolute` - "8.2G"
 - `both` - "8.2/16G"
@@ -231,6 +235,7 @@ backend = "auto"         # "auto", "mango", "hyprland", or "niri"
 ```
 
 Auto-detection:
+
 1. `HYPRLAND_INSTANCE_SIGNATURE` env var → `hyprland`
 2. `NIRI_SOCKET` env var → `niri`
 3. Otherwise → `mango` (MangoWC/DWL)

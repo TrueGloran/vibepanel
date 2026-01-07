@@ -385,7 +385,6 @@ calendar.view {{
 
 calendar.view grid {{
     background: transparent;
-    border-spacing: 8px 4px;
 }}
 
 calendar.view grid label.week-number {{
@@ -397,7 +396,6 @@ calendar.view grid label.today {{
     background: var(--color-accent-primary);
     color: var(--color-accent-text, #fff);
     border-radius: var(--radius-pill);
-    padding: 0 0.5em;
     box-shadow: none;
 }}
 
@@ -411,6 +409,18 @@ calendar.view grid *:selected:not(.today) {{
     background: transparent;
     color: inherit;
     box-shadow: none;
+
+calendar.view grid label.day-number {{
+    margin: 1px 2px;
+    min-width: 24px;
+    min-height: 24px;
+}}
+
+}}.week-number-header {{
+    font-size: var(--font-size-xs);
+    color: var(--color-foreground-muted);
+    margin-left: 20px; /* Align with week numbers column */
+    margin-top: 16px; /* Align vertically with day headers (M T W...) */
 }}
 
 /* ===== QUICK SETTINGS ===== */

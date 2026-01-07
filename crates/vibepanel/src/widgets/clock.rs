@@ -26,11 +26,13 @@ const DEFAULT_FORMAT: &str = "%a %d %H:%M";
 pub struct ClockConfig {
     /// strftime format string for the clock display.
     pub format: String,
+    /// Whether to show week numbers in the calendar popover.
+    pub show_week_numbers: bool,
 }
 
 impl WidgetConfig for ClockConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("clock", entry, &["format"]);
+        warn_unknown_options("clock", entry, &["format", "show_week_numbers"]);
 
         let format = entry
             .options
@@ -38,7 +40,17 @@ impl WidgetConfig for ClockConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_FORMAT)
             .to_string();
-        Self { format }
+
+        let show_week_numbers = entry
+            .options
+            .get("show_week_numbers")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        Self {
+            format,
+            show_week_numbers,
+        }
     }
 }
 
@@ -46,6 +58,7 @@ impl Default for ClockConfig {
     fn default() -> Self {
         Self {
             format: DEFAULT_FORMAT.to_string(),
+            show_week_numbers: true,
         }
     }
 }
@@ -71,7 +84,10 @@ impl ClockWidget {
 
         let label = base.add_label(Some("--:--"), &[wgt::CLOCK_LABEL]);
 
-        base.create_menu("calendar", build_clock_calendar_popover);
+        let show_week_numbers = config.show_week_numbers;
+        base.create_menu("calendar", move || {
+            build_clock_calendar_popover(show_week_numbers)
+        });
 
         let timer_source = Rc::new(RefCell::new(None));
 
