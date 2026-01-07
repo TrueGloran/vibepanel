@@ -409,6 +409,7 @@ calendar.view grid *:selected:not(.today) {{
     background: transparent;
     color: inherit;
     box-shadow: none;
+}}
 
 calendar.view grid label.day-number {{
     margin: 1px 2px;
@@ -416,7 +417,7 @@ calendar.view grid label.day-number {{
     min-height: 24px;
 }}
 
-}}.week-number-header {{
+.week-number-header {{
     font-size: var(--font-size-xs);
     color: var(--color-foreground-muted);
     margin-left: 20px; /* Align with week numbers column */
