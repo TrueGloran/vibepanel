@@ -39,6 +39,11 @@ VibePanel aims to be a simple bar that just works and looks good without configu
 VibePanel is in early 0.x development but should be stable enough for daily use.
 Config options and defaults may change between minor releases, check the changelog when upgrading.
 
+### Compatibility
+
+- **Compositors:** Hyprland, Niri, MangoWC/DWL. Sway support may be added based on demand.
+- **Updates widget:** dnf and pacman/paru. More package managers planned.
+
 ## Quickstart
 
 1. Install runtime dependencies: Wayland, a supported compositor (Hyprland, Niri, MangoWC, DWL), PulseAudio/PipeWire, UPower, NetworkManager, BlueZ, GTK4.
@@ -88,7 +93,7 @@ See [docs/configuration.md](docs/configuration.md) for all options and [docs/css
 
 ## Vibe Code Disclaimer
 
-As the title suggests, this project is mainly vibe coded. While I've tried to do it responsibly, I'm not a Rust developer nor particularly familiar with GTK. Without AI, VibePanel wouldn't exist but it allowed me to create a bar I actually enjoy using so I'm thankful. I've done my due diligence to the best of my abilities to make sure the codebase is solid, but you have been warned :)
+As the title suggests, this project is mainly vibe coded. I'm not a Rust developer and had little GTK experience when starting this project. I've done my best to keep the codebase solid and maintainable, but rough edges might exist. You have been warned :)
 
 ## Documentation
 
