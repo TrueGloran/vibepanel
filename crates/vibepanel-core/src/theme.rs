@@ -628,19 +628,26 @@ impl ThemePalette {
     }
 
     fn compute_accent_derived(&mut self) {
+        // Accent text matches system text direction:
+        // - Light mode (dark system text) → dark accent text
+        // - Dark mode (light system text) → light accent text
+        let accent_text_color = if self.is_dark_mode {
+            "#ffffff".to_string()
+        } else {
+            "#000000".to_string()
+        };
+
         match &self.accent_source {
             AccentSource::Custom(color) => {
-                // Custom accent color - compute derived values
                 self.accent_subtle = format!("color-mix(in srgb, {} 20%, transparent)", color);
-                self.accent_text = "#ffffff".to_string();
+                self.accent_text = accent_text_color;
             }
             AccentSource::Gtk => {
                 // GTK accent - use @accent_color references
                 // These will be overridden in css_vars_block() to reference GTK colors
                 self.accent_subtle =
                     "color-mix(in srgb, @accent_color 20%, transparent)".to_string();
-                // For text on accent backgrounds, white is usually safe
-                self.accent_text = "#ffffff".to_string();
+                self.accent_text = accent_text_color;
             }
             AccentSource::None => {
                 // Monochrome mode - adapt to dark/light theme
