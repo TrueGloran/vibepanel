@@ -102,6 +102,12 @@ impl TooltipWindow {
     fn apply_styles(window: &Window, label: &Label, styles: &SurfaceStyles) {
         let radius = (styles.border_radius / 2).max(4);
 
+        // Apply slight transparency to tooltip background
+        let bg = format!(
+            "color-mix(in srgb, {} 80%, transparent)",
+            styles.background_color
+        );
+
         // Use CSS for font styling (native GTK behavior)
         let css = format!(
             r#"
@@ -118,7 +124,7 @@ impl TooltipWindow {
     color: {fg};
 }}
 "#,
-            bg = styles.background_color,
+            bg = bg,
             radius = radius,
             font = styles.font_family,
             size = styles.font_size,
