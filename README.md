@@ -2,11 +2,11 @@
 
 A GTK4 status bar for Wayland. Supports Hyprland, Niri, MangoWC and DWL.
 
-VibePanel aims to be a simple bar that just works and looks good without configuration while also being fully customizable. Configure what you need, ignore what you don't.
+VibePanel is a GTK4 status bar for Wayland that works out of the box with zero configuration. It's designed to be simple to use but easy to tweak when you want to customize it.
 
 ## Screenshots
 
-Here are some examples of what you can do with VibePanel and just ~10-40 lines of config, no CSS.
+These examples use roughly ~10–35 lines of TOML to get completely different vibes, no CSS required.
 
 <table align="center">
   <tr>
@@ -24,10 +24,10 @@ Here are some examples of what you can do with VibePanel and just ~10-40 lines o
 ## Features
 
 - **Hot-reload** - config and style changes apply instantly
+- **Theming & Styling** - Simple TOML config, CSS is there if you need it
 - **Multi-monitor support** - Configure which monitors to display the bar on
-- **Theming** - dark/light modes, custom accents, GTK theme integration, full CSS customization
 - **OSD** - on-screen display for brightness and volume changes
-- **CLI tools** - control brightness, volume, and idle inhibition
+- **CLI tools** - control brightness volume
 - **Widgets**
   - Workspaces - clickable indicators with tooltips
   - Window title - active window with app icon
@@ -72,7 +72,7 @@ See [Installation](https://github.com/prankstr/vibepanel/wiki/Installation) for 
 
 ## Configuration
 
-VibePanel works without a config file and tries to have sensible defaults while still keeping everything configurable. If you want to customize, create a config at `~/.config/vibepanel/config.toml`:
+VibePanel doesn't require a config file to run, but if you want to customize anything, create a config at `~/.config/vibepanel/config.toml`:
 
 ```sh
 touch ~/.config/vibepanel/config.toml
