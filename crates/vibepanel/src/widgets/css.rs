@@ -68,6 +68,7 @@ label link:active {
 }
 
 /* Make popover shell transparent so our content shows */
+/* Note: border-radius is applied by SurfaceStyleManager::apply_surface_styles() */
 popover.widget-menu {
     background: transparent;
     border: none;
@@ -373,6 +374,19 @@ button.vp-btn-link:hover,
     text-decoration: underline;
 }}
 
+/* Ghost button - transparent with hover effect */
+button.vp-btn-ghost {{
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: var(--radius-widget);
+    color: var(--color-foreground-primary);
+}}
+
+button.vp-btn-ghost:hover {{
+    background: var(--color-card-overlay-hover);
+}}
+
 /* ===== CALENDAR ===== */
 
 /* Note: padding comes from apply_surface_styles() in base.rs */
@@ -521,6 +535,7 @@ window.quick-settings-window {{
 .qs-row-menu-content {{
     font-family: var(--font-family);
     font-size: var(--font-size);
+    border-radius: var(--radius-surface);
 }}
 
 /* Row hamburger menu button */

@@ -100,8 +100,6 @@ impl TooltipWindow {
     }
 
     fn apply_styles(window: &Window, label: &Label, styles: &SurfaceStyles) {
-        let radius = (styles.border_radius / 2).max(4);
-
         // Apply slight transparency to tooltip background
         let bg = format!(
             "color-mix(in srgb, {} 80%, transparent)",
@@ -109,11 +107,12 @@ impl TooltipWindow {
         );
 
         // Use CSS for font styling (native GTK behavior)
+        // Use var(--radius-surface) for border-radius to respect theme settings including 0
         let css = format!(
             r#"
 .vibepanel-tooltip {{
     background-color: {bg};
-    border-radius: {radius}px;
+    border-radius: var(--radius-surface);
     border: none;
     padding: 6px 10px;
 }}
@@ -125,7 +124,6 @@ impl TooltipWindow {
 }}
 "#,
             bg = bg,
-            radius = radius,
             font = styles.font_family,
             size = styles.font_size,
             fg = styles.text_color,

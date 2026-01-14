@@ -318,6 +318,7 @@ impl SurfaceStyleManager {
         // Build CSS targeting the widget's CSS name
         // For Popover, we need to target both the popover and its contents
         // Use high-specificity selectors to override GTK themes
+        // Use var(--radius-surface) CSS variable to respect theme settings including 0
         let css_name = widget.css_name();
         let css = if css_name == "popover" {
             format!(
@@ -328,7 +329,7 @@ popover.widget-menu.background {{
     background: {bg};
     background-image: none;
     border: none;
-    border-radius: {radius}px;
+    border-radius: var(--radius-surface);
     box-shadow: {shadow};
 }}
 
@@ -338,7 +339,7 @@ popover.widget-menu.background > contents {{
     background: transparent;
     background-image: none;
     border: none;
-    border-radius: 0;
+    border-radius: var(--radius-surface);
     font-family: {font};
     font-size: var(--font-size);
     color: {fg};
@@ -362,7 +363,6 @@ popover.widget-menu.background * {{
 }}
 "#,
                 bg = bg,
-                radius = styles.border_radius,
                 font = styles.font_family,
                 fg = styles.text_color,
                 padding = padding_css,
@@ -384,7 +384,7 @@ popover.widget-menu.background * {{
 {selector} {{
     background-color: {bg};
     background-image: none;
-    border-radius: {radius}px;
+    border-radius: var(--radius-surface);
     font-family: {font};
     font-size: var(--font-size);
     color: {fg};
@@ -399,7 +399,6 @@ popover.widget-menu.background * {{
 "#,
                 selector = selector,
                 bg = bg,
-                radius = styles.border_radius,
                 font = styles.font_family,
                 fg = styles.text_color,
                 padding = padding_css,
