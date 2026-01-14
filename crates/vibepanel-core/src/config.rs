@@ -891,12 +891,17 @@ pub struct IconsConfig {
     /// Icon backend: "material" for bundled Material Symbols, or "gtk" for
     /// the system GTK icon theme.
     pub theme: String,
+
+    /// Icon stroke weight for Material Symbols (100-700). Lower = thinner strokes.
+    /// Only applies when theme = "material". Default: 400.
+    pub weight: u16,
 }
 
 impl Default for IconsConfig {
     fn default() -> Self {
         Self {
             theme: "material".to_string(),
+            weight: 400,
         }
     }
 }

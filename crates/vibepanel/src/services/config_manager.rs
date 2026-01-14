@@ -308,13 +308,18 @@ impl ConfigManager {
 
         info!("Applying new configuration...");
 
-        // Update icons theme
-        if old_config.icons.theme != new_config.icons.theme {
+        // Update icons theme and/or weight
+        if old_config.icons.theme != new_config.icons.theme
+            || old_config.icons.weight != new_config.icons.weight
+        {
             info!(
-                "Icon theme changed: {} -> {}",
-                old_config.icons.theme, new_config.icons.theme
+                "Icon config changed: theme {} -> {}, weight {} -> {}",
+                old_config.icons.theme,
+                new_config.icons.theme,
+                old_config.icons.weight,
+                new_config.icons.weight
             );
-            IconsService::global().reconfigure(&new_config.icons.theme);
+            IconsService::global().reconfigure(&new_config.icons.theme, new_config.icons.weight);
         }
 
         // Update theme/palette if theme config changed

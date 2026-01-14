@@ -1156,6 +1156,8 @@ impl IconHandle {
 pub struct IconsService {
     /// The configured icon theme name (e.g., "material", "Adwaita").
     theme: RefCell<String>,
+    /// Font weight for Material Symbols (100-700, default 400).
+    weight: RefCell<u16>,
     /// Whether the Material Symbols font was successfully loaded.
     material_ready: RefCell<bool>,
     /// Whether we've attempted to load the font CSS.
@@ -1164,17 +1166,21 @@ pub struct IconsService {
     icon_theme: RefCell<Option<IconTheme>>,
     /// Weak references to all created icon handles for live reload.
     handles: RefCell<Vec<Weak<IconHandleInner>>>,
+    /// CSS provider for Material Symbols (stored for replacement on weight change).
+    material_css_provider: RefCell<Option<gtk4::CssProvider>>,
 }
 
 impl IconsService {
-    /// Create a new IconsService with the given theme name.
-    fn new(theme: String) -> Rc<Self> {
+    /// Create a new IconsService with the given theme name and font weight.
+    fn new(theme: String, weight: u16) -> Rc<Self> {
         let service = Rc::new(Self {
             theme: RefCell::new(theme.clone()),
+            weight: RefCell::new(weight),
             material_ready: RefCell::new(false),
             css_loaded: RefCell::new(false),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
+            material_css_provider: RefCell::new(None),
         });
 
         IconsService::setup_backends(&service, &theme);
@@ -1225,28 +1231,28 @@ impl IconsService {
         ICONS_INSTANCE.with(|cell| {
             let mut opt = cell.borrow_mut();
             if opt.is_none() {
-                *opt = Some(IconsService::new("material".to_string()));
+                *opt = Some(IconsService::new("material".to_string(), 400));
             }
             opt.as_ref().unwrap().clone()
         })
     }
 
-    /// Initialize the global IconsService with a specific theme.
+    /// Initialize the global IconsService with a specific theme and font weight.
     ///
     /// Must be called before `global()` is first accessed, typically
     /// during application startup after loading config.
-    pub fn init_global(theme: &str) {
+    pub fn init_global(theme: &str, weight: u16) {
         ICONS_INSTANCE.with(|cell| {
             let mut opt = cell.borrow_mut();
             if opt.is_some() {
                 warn!("IconsService already initialized, ignoring init_global call");
                 return;
             }
-            *opt = Some(IconsService::new(theme.to_string()));
+            *opt = Some(IconsService::new(theme.to_string(), weight));
         });
     }
 
-    /// Reconfigure the icon service with a new theme.
+    /// Reconfigure the icon service with a new theme and/or font weight.
     ///
     /// This updates the backend and reapplies all existing icons to reflect
     /// the new theme. Use this for live config reload.
@@ -1255,23 +1261,42 @@ impl IconsService {
     ///
     /// * `new_theme` - The new theme name ("material" for Material Symbols,
     ///   or a GTK theme name like "Adwaita", "Breeze", etc.)
-    pub fn reconfigure(&self, new_theme: &str) {
+    /// * `new_weight` - The font weight for Material Symbols (100-700)
+    pub fn reconfigure(&self, new_theme: &str, new_weight: u16) {
         let old_theme = self.theme.borrow().clone();
-        if old_theme == new_theme {
-            debug!("Icon theme unchanged ({}), skipping reconfigure", new_theme);
+        let old_weight = *self.weight.borrow();
+        let theme_changed = old_theme != new_theme;
+        let weight_changed = old_weight != new_weight;
+
+        if !theme_changed && !weight_changed {
+            debug!(
+                "Icon theme and weight unchanged ({}, {}), skipping reconfigure",
+                new_theme, new_weight
+            );
             return;
         }
 
-        info!("Reconfiguring icon theme: {} -> {}", old_theme, new_theme);
+        if theme_changed {
+            info!("Reconfiguring icon theme: {} -> {}", old_theme, new_theme);
+        }
+        if weight_changed {
+            info!(
+                "Reconfiguring icon weight: {} -> {}",
+                old_weight, new_weight
+            );
+        }
 
-        // Update theme name
+        // Update theme name and weight
         *self.theme.borrow_mut() = new_theme.to_string();
+        *self.weight.borrow_mut() = new_weight;
 
         // Track if we're switching TO material (need to defer icon rebuild)
         let switching_to_material = is_material_theme(new_theme) && !is_material_theme(&old_theme);
 
-        // Ensure Material CSS is loaded if switching to Material
-        if is_material_theme(new_theme) {
+        // Reload Material CSS if switching to Material or if weight changed while using Material
+        if is_material_theme(new_theme) && (switching_to_material || weight_changed) {
+            // Force CSS reload by resetting the flag
+            *self.css_loaded.borrow_mut() = false;
             self.ensure_material_css();
         }
 
@@ -1284,7 +1309,7 @@ impl IconsService {
                 service.reapply_all_icons();
             });
         } else {
-            // For other transitions (Material->GTK, GTK->GTK), apply immediately
+            // For other transitions (Material->GTK, GTK->GTK, weight change), apply immediately
             self.reapply_all_icons();
         }
     }
@@ -1390,6 +1415,9 @@ impl IconsService {
     }
 
     /// Ensure Material Symbols CSS is loaded and font is registered.
+    ///
+    /// If a previous CSS provider exists (from a prior call), it is removed
+    /// from the display before adding the new one. This allows live weight changes.
     fn ensure_material_css(&self) {
         if *self.css_loaded.borrow() {
             return;
@@ -1400,6 +1428,12 @@ impl IconsService {
             warn!("No display available, cannot load Material Symbols CSS");
             return;
         };
+
+        // Remove old CSS provider if it exists (for weight changes)
+        if let Some(old_provider) = self.material_css_provider.borrow().as_ref() {
+            gtk4::style_context_remove_provider_for_display(&display, old_provider);
+            debug!("Removed old Material Symbols CSS provider");
+        }
 
         // Try to find and register the font file
         let font_path = Self::find_font_path();
@@ -1421,6 +1455,9 @@ impl IconsService {
             debug!("Font not registered via fontconfig, will try system fonts");
         }
 
+        // Get the current weight setting
+        let weight = *self.weight.borrow();
+
         // MINIMAL CSS - just the font setup for Material Symbols
         let css = format!(
             r#"
@@ -1428,6 +1465,7 @@ impl IconsService {
 .material-symbol {{
     font-family: '{}', 'Material Symbols Rounded', sans-serif;
     font-feature-settings: 'liga' 1;
+    font-variation-settings: 'wght' {};
     font-size: var(--icon-size);
 }}
 
@@ -1453,7 +1491,7 @@ impl IconsService {
     font-size: calc(var(--icon-size) * 1.15);
 }}
 "#,
-            MATERIAL_FONT_FAMILY
+            MATERIAL_FONT_FAMILY, weight
         );
 
         let provider = gtk4::CssProvider::new();
@@ -1465,10 +1503,13 @@ impl IconsService {
             gtk4::STYLE_PROVIDER_PRIORITY_USER + 5,
         );
 
+        // Store the provider for later removal if weight changes
+        *self.material_css_provider.borrow_mut() = Some(provider);
+
         *self.material_ready.borrow_mut() = true;
         debug!(
-            "Material Symbols CSS loaded (font_registered={})",
-            font_registered
+            "Material Symbols CSS loaded (font_registered={}, weight={})",
+            font_registered, weight
         );
     }
 
@@ -1759,19 +1800,23 @@ mod tests {
         // Can't test singleton easily, but we can test via direct struct creation
         let service = IconsService {
             theme: RefCell::new("material".to_string()),
+            weight: RefCell::new(400),
             material_ready: RefCell::new(false),
             css_loaded: RefCell::new(false),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
+            material_css_provider: RefCell::new(None),
         };
         assert!(service.uses_material());
 
         let service2 = IconsService {
             theme: RefCell::new("adwaita".to_string()),
+            weight: RefCell::new(400),
             material_ready: RefCell::new(false),
             css_loaded: RefCell::new(false),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
+            material_css_provider: RefCell::new(None),
         };
         assert!(!service2.uses_material());
     }
@@ -1787,10 +1832,12 @@ mod tests {
         // When material_ready is true and theme is "material", should return Material
         let service = IconsService {
             theme: RefCell::new("material".to_string()),
+            weight: RefCell::new(400),
             material_ready: RefCell::new(true),
             css_loaded: RefCell::new(true),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
+            material_css_provider: RefCell::new(None),
         };
         assert_eq!(service.current_backend_kind(), IconBackendKind::Material);
     }
@@ -1801,10 +1848,12 @@ mod tests {
         // (no icon_theme available in this test)
         let service = IconsService {
             theme: RefCell::new("material".to_string()),
+            weight: RefCell::new(400),
             material_ready: RefCell::new(false),
             css_loaded: RefCell::new(false),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
+            material_css_provider: RefCell::new(None),
         };
         assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
     }
@@ -1814,10 +1863,12 @@ mod tests {
         // When theme is not "material" but no icon_theme is available, falls back to Text
         let service = IconsService {
             theme: RefCell::new("Adwaita".to_string()),
+            weight: RefCell::new(400),
             material_ready: RefCell::new(false),
             css_loaded: RefCell::new(false),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
+            material_css_provider: RefCell::new(None),
         };
         assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
     }
@@ -1827,10 +1878,12 @@ mod tests {
         // Test that reconfigure() updates theme and backend kind
         let service = IconsService {
             theme: RefCell::new("material".to_string()),
+            weight: RefCell::new(400),
             material_ready: RefCell::new(true),
             css_loaded: RefCell::new(true),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
+            material_css_provider: RefCell::new(None),
         };
 
         assert_eq!(service.theme(), "material");
@@ -1838,7 +1891,7 @@ mod tests {
         assert_eq!(service.current_backend_kind(), IconBackendKind::Material);
 
         // Reconfigure to a GTK theme
-        service.reconfigure("Adwaita");
+        service.reconfigure("Adwaita", 400);
 
         assert_eq!(service.theme(), "Adwaita");
         assert!(!service.uses_material());
@@ -1848,17 +1901,19 @@ mod tests {
 
     #[test]
     fn test_reconfigure_same_theme_is_noop() {
-        // Reconfiguring to the same theme should be a no-op
+        // Reconfiguring to the same theme and weight should be a no-op
         let service = IconsService {
             theme: RefCell::new("material".to_string()),
+            weight: RefCell::new(400),
             material_ready: RefCell::new(true),
             css_loaded: RefCell::new(true),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
+            material_css_provider: RefCell::new(None),
         };
 
         // This should not change anything
-        service.reconfigure("material");
+        service.reconfigure("material", 400);
 
         assert_eq!(service.theme(), "material");
         assert!(service.uses_material());
