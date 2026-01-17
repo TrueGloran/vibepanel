@@ -1,5 +1,5 @@
 Name:           vibepanel
-Version:        0.5.1
+Version:        0.5.2 # x-release-please-version
 Release:        1%{?dist}
 Summary:        A GTK4 panel for Wayland with notifications, OSD, and quick settings
 
@@ -44,5 +44,5 @@ install -Dm755 target/release/vibepanel %{buildroot}%{_bindir}/vibepanel
 %{_bindir}/vibepanel
 
 %changelog
-* Sat Jan 17 2026 prankstr - 0.5.1-1
-- Initial package
+* Sat Jan 17 2026 prankstr
+- See https://github.com/prankstr/vibepanel/releases for changelog

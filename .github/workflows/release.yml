@@ -213,4 +213,8 @@ jobs:
       - name: Trigger Copr build
         run: |
           TAG="${{ inputs.tag_name || github.ref_name }}"
-          copr-cli build-package prankstr/vibepanel --name vibepanel --committish "$TAG"
+          copr-cli buildscm prankstr/vibepanel \
+            --clone-url https://github.com/prankstr/vibepanel \
+            --committish "$TAG" \
+            --method make_srpm \
+            --subdir .copr
