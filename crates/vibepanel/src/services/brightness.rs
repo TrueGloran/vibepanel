@@ -188,12 +188,6 @@ impl BrightnessService {
         self.ready.get()
     }
 
-    /// Whether a usable backend is available.
-    #[allow(dead_code)]
-    pub fn is_available(&self) -> bool {
-        self.current.borrow().available
-    }
-
     /// Set brightness as a percentage (0–100).
     ///
     /// Values are clamped to [0, 100]. If no device is available, this is a no-op.

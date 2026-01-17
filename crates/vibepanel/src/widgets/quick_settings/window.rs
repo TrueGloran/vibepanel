@@ -517,7 +517,7 @@ impl QuickSettingsWindow {
             content.append(&mic_revealer);
         }
 
-        if cfg.brightness {
+        if cfg.brightness && BrightnessService::global().current().available {
             let brightness_row = Self::build_brightness_section(qs);
             content.append(&brightness_row);
         }
