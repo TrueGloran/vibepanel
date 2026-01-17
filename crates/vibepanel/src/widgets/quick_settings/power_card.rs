@@ -30,7 +30,7 @@ use crate::styles::{button, card, color, qs, row};
 use crate::widgets::base::configure_popover;
 
 use super::components::{CardLabel, ToggleCard};
-use super::ui_helpers::{AccordionManager, ExpandableCard, ExpandableCardBase, create_qs_list_box};
+use super::ui_helpers::{ExpandableCard, ExpandableCardBase, create_qs_list_box};
 
 /// Animation duration for hold-to-confirm (ms).
 const HOLD_DURATION_MS: u64 = 800;
@@ -529,11 +529,15 @@ fn create_power_popover_action(action: &'static PowerAction) -> Overlay {
 /// Build power card with expander and ListRows.
 ///
 /// - Toggle button: Hold-to-confirm for Shutdown (default action)
-/// - Chevron button: Instant click to expand/collapse
+/// - Chevron button: Caller is responsible for setting up click handler
 /// - Rows: Hold-to-confirm for each action
-pub fn build_power_card_expander(
-    accordion: &Rc<AccordionManager>,
-) -> (GtkBox, Revealer, Rc<PowerCardExpanderState>) {
+///
+/// Returns `(card, revealer, state, expander_button)` - caller is responsible for
+/// setting up the expander button click handler via `AccordionManager::setup_expander_with_callback`,
+/// which handles accordion behavior, revealer toggling, and arrow CSS updates.
+/// The caller can provide an `on_toggle` callback to update the subtitle text.
+pub fn build_power_card_expander() -> (GtkBox, Revealer, Rc<PowerCardExpanderState>, Option<Button>)
+{
     let state = Rc::new(PowerCardExpanderState::new());
 
     // Build the card using ToggleCard pattern
@@ -563,9 +567,6 @@ pub fn build_power_card_expander(
     *state.base.revealer.borrow_mut() = Some(revealer.clone());
     *state.base.list_box.borrow_mut() = Some(details.list_box);
 
-    // Register with accordion
-    accordion.register(Rc::clone(&state));
-
     // Create an overlay wrapper for the entire card (for hold-to-confirm progress)
     let card_overlay = Overlay::new();
     card_overlay.add_css_class(qs::POWER_CARD);
@@ -592,51 +593,16 @@ pub fn build_power_card_expander(
         });
     }
 
-    // Set up CHEVRON BUTTON: Instant click to expand/collapse
-    if let Some(ref expander_btn) = card.expander_button {
-        let revealer_clone = revealer.clone();
-        let arrow_clone = card.expander_icon.clone();
-        let accordion_clone = Rc::clone(accordion);
-        let state_clone = Rc::clone(&state);
-
-        expander_btn.connect_clicked(move |_| {
-            let expanding = !revealer_clone.reveals_child();
-
-            // Collapse other cards first (accordion behavior)
-            if expanding {
-                accordion_clone.collapse_others(&revealer_clone);
-            }
-
-            revealer_clone.set_reveal_child(expanding);
-
-            // Update chevron rotation
-            if let Some(ref arrow) = arrow_clone {
-                if expanding {
-                    arrow.widget().add_css_class(crate::styles::state::EXPANDED);
-                } else {
-                    arrow
-                        .widget()
-                        .remove_css_class(crate::styles::state::EXPANDED);
-                }
-            }
-
-            // Update subtitle
-            if let Some(subtitle) = state_clone.base.subtitle.borrow().as_ref() {
-                subtitle.set_label(if expanding {
-                    "Hold to confirm"
-                } else {
-                    "Hold to shutdown"
-                });
-            }
-        });
-    }
+    // NOTE: Chevron button click handler is NOT connected here.
+    // The caller must set up the handler to ensure proper accordion behavior
+    // (collapse_others must be called BEFORE toggling the revealer).
 
     // Wrap overlay in a box to return (matching expected return type)
     let wrapper = GtkBox::new(Orientation::Horizontal, 0);
     wrapper.append(&card_overlay);
     // Don't hexpand the wrapper - let it size from the card content
 
-    (wrapper, revealer, state)
+    (wrapper, revealer, state, card.expander_button)
 }
 
 /// Result of building power details section.
@@ -733,20 +699,28 @@ pub enum PowerCardBuildResult {
         card: GtkBox,
         revealer: Revealer,
         state: Rc<PowerCardExpanderState>,
+        /// Expander button for accordion registration (if caller wants to add accordion behavior)
+        expander_button: Option<Button>,
     },
 }
 
 /// Build the power card using the configured variant.
-pub fn build_power_card(accordion: &Rc<AccordionManager>) -> PowerCardBuildResult {
+///
+/// For the Expander variant, returns an expander_button that can be used to set up
+/// accordion behavior. Note that the Power card already handles its own expand/collapse
+/// with subtitle updates, so the caller should use a custom accordion setup that
+/// calls `accordion.collapse_others()` before the card's built-in handler runs.
+pub fn build_power_card() -> PowerCardBuildResult {
     if USE_POPOVER_VARIANT {
         let (card, state) = build_power_card_popover();
         PowerCardBuildResult::Popover { card, state }
     } else {
-        let (card, revealer, state) = build_power_card_expander(accordion);
+        let (card, revealer, state, expander_button) = build_power_card_expander();
         PowerCardBuildResult::Expander {
             card,
             revealer,
             state,
+            expander_button,
         }
     }
 }

@@ -8,8 +8,8 @@ use gtk4::gdk::{self, Monitor};
 use gtk4::glib::{self, ControlFlow, Propagation};
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Label,
-    Orientation, Revealer, RevealerTransitionType,
+    Application, ApplicationWindow, Box as GtkBox, Button, EventControllerKey, GestureClick, Label,
+    Orientation, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
@@ -37,7 +37,7 @@ use super::components::ToggleCard;
 use super::idle_inhibitor_card::{self, IdleInhibitorCardState};
 use super::mic_card::{self, MicCardState, build_mic_details, build_mic_hint_label, build_mic_row};
 use super::power_card::{self, PowerCardBuildResult};
-use super::ui_helpers::AccordionManager;
+use super::ui_helpers::{AccordionManager, ExpandableCard};
 use super::updates_card::{self, UpdatesCardState, build_updates_card};
 use super::vpn_card::{self, VpnCardState, build_vpn_details, vpn_icon_name};
 use super::wifi_card::{self, WifiCardState, build_wifi_details, wifi_icon_name};
@@ -64,6 +64,9 @@ pub struct QuickSettingsWindow {
     /// Pending close timeout (for debounced focus-loss detection).
     pending_close: Cell<Option<glib::SourceId>>,
 
+    /// Scrolled window container for height limiting.
+    scroll_container: ScrolledWindow,
+
     // Card states (organized by panel)
     pub wifi: Rc<WifiCardState>,
     pub bluetooth: Rc<BluetoothCardState>,
@@ -73,9 +76,6 @@ pub struct QuickSettingsWindow {
     pub mic: Rc<MicCardState>,
     pub brightness: Rc<BrightnessCardState>,
     pub updates: Rc<UpdatesCardState>,
-
-    /// Accordion manager for expandable cards.
-    accordion: Rc<AccordionManager>,
 }
 
 impl QuickSettingsWindow {
@@ -103,6 +103,14 @@ impl QuickSettingsWindow {
         window.set_margin(Edge::Right, 8);
         window.set_keyboard_mode(KeyboardMode::OnDemand);
 
+        // Create scroll container for height limiting.
+        // Max height will be set in update_position() based on monitor geometry.
+        // propagate_natural_height allows it to grow to fit content, max_content_height caps it.
+        let scroll_container = ScrolledWindow::new();
+        scroll_container.set_hscrollbar_policy(PolicyType::Never);
+        scroll_container.set_vscrollbar_policy(PolicyType::Automatic);
+        scroll_container.set_propagate_natural_height(true);
+
         // Create the QuickSettingsWindow struct first (without content)
         let qs = Rc::new(Self {
             window: window.clone(),
@@ -112,6 +120,7 @@ impl QuickSettingsWindow {
             anchor_monitor: RefCell::new(None),
             cards_config,
             pending_close: Cell::new(None),
+            scroll_container,
             wifi: Rc::new(WifiCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
             vpn: Rc::new(VpnCardState::new()),
@@ -120,10 +129,9 @@ impl QuickSettingsWindow {
             mic: Rc::new(MicCardState::new()),
             brightness: Rc::new(BrightnessCardState::new()),
             updates: Rc::new(UpdatesCardState::new()),
-            accordion: Rc::new(AccordionManager::new()),
         });
 
-        // Build the control center content
+        // Build the control center content (uses qs.scroll_container internally)
         let outer = Self::build_content(&qs);
         window.set_child(Some(&outer));
 
@@ -333,74 +341,118 @@ impl QuickSettingsWindow {
 
         let cfg = &qs.cards_config;
 
-        // Collect toggle cards and their revealers
-        // These are the cards that appear in the 2-per-row grid
-        struct ToggleCard {
+        // Collect toggle cards and their revealers.
+        // These are the cards that appear in the 2-per-row grid.
+        //
+        // Cards with expandable state store a trait object for uniform accordion
+        // registration. Cards that need custom expand/collapse behavior (e.g.,
+        // Power card updating its subtitle) provide an on_toggle callback.
+        struct ToggleCardInfo {
             card: GtkBox,
             revealer: Option<Revealer>,
+            expander_button: Option<Button>,
+            /// Expandable card state (if this card supports accordion behavior).
+            expandable: Option<Rc<dyn ExpandableCard>>,
+            /// Optional callback invoked after expand/collapse toggle.
+            /// Receives `true` if expanding, `false` if collapsing.
+            on_toggle: Option<Rc<dyn Fn(bool)>>,
         }
 
-        let mut toggle_cards: Vec<ToggleCard> = Vec::new();
+        let mut toggle_cards: Vec<ToggleCardInfo> = Vec::new();
 
         // Build enabled cards
         if cfg.wifi {
-            let (card, revealer) = Self::build_wifi_card(qs);
-            toggle_cards.push(ToggleCard {
+            let (card, revealer, expander_button) = Self::build_wifi_card(qs);
+            toggle_cards.push(ToggleCardInfo {
                 card,
                 revealer: Some(revealer),
+                expander_button,
+                expandable: Some(Rc::clone(&qs.wifi) as Rc<dyn ExpandableCard>),
+                on_toggle: None,
             });
         }
         if cfg.bluetooth {
-            let (card, revealer) = Self::build_bluetooth_card(qs);
-            toggle_cards.push(ToggleCard {
+            let (card, revealer, expander_button) = Self::build_bluetooth_card(qs);
+            toggle_cards.push(ToggleCardInfo {
                 card,
                 revealer: Some(revealer),
+                expander_button,
+                expandable: Some(Rc::clone(&qs.bluetooth) as Rc<dyn ExpandableCard>),
+                on_toggle: None,
             });
         }
         if cfg.vpn {
-            let (card, revealer) = Self::build_vpn_card(qs);
-            toggle_cards.push(ToggleCard {
+            let (card, revealer, expander_button) = Self::build_vpn_card(qs);
+            toggle_cards.push(ToggleCardInfo {
                 card,
                 revealer: Some(revealer),
+                expander_button,
+                expandable: Some(Rc::clone(&qs.vpn) as Rc<dyn ExpandableCard>),
+                on_toggle: None,
             });
         }
         if cfg.idle_inhibitor {
             let card = Self::build_idle_inhibitor_card(qs);
-            toggle_cards.push(ToggleCard {
+            toggle_cards.push(ToggleCardInfo {
                 card,
                 revealer: None,
+                expander_button: None,
+                expandable: None,
+                on_toggle: None,
             });
         }
         if cfg.updates {
-            let (card, revealer) = build_updates_card(&qs.updates, &qs.accordion);
-            toggle_cards.push(ToggleCard {
+            let (card, revealer, expander_button) = build_updates_card(&qs.updates);
+            toggle_cards.push(ToggleCardInfo {
                 card,
                 revealer: Some(revealer),
+                expander_button,
+                expandable: Some(Rc::clone(&qs.updates) as Rc<dyn ExpandableCard>),
+                on_toggle: None,
             });
         }
         // Power card (always last in the grid)
         if cfg.power {
-            match power_card::build_power_card(&qs.accordion) {
+            match power_card::build_power_card() {
                 PowerCardBuildResult::Popover { card, state: _ } => {
-                    toggle_cards.push(ToggleCard {
+                    toggle_cards.push(ToggleCardInfo {
                         card,
                         revealer: None,
+                        expander_button: None,
+                        expandable: None,
+                        on_toggle: None,
                     });
                 }
                 PowerCardBuildResult::Expander {
                     card,
                     revealer,
-                    state: _,
+                    state,
+                    expander_button,
                 } => {
-                    toggle_cards.push(ToggleCard {
+                    // Power card needs custom subtitle behavior on expand/collapse.
+                    // Capture state and borrow inside callback to handle cases where
+                    // subtitle might be set after callback creation.
+                    let state_clone = Rc::clone(&state);
+                    toggle_cards.push(ToggleCardInfo {
                         card,
                         revealer: Some(revealer),
+                        expander_button,
+                        expandable: Some(state as Rc<dyn ExpandableCard>),
+                        on_toggle: Some(Rc::new(move |expanding| {
+                            if let Some(ref subtitle) = *state_clone.base.subtitle.borrow() {
+                                subtitle.set_label(if expanding {
+                                    "Hold to confirm"
+                                } else {
+                                    "Hold to shutdown"
+                                });
+                            }
+                        })),
                     });
                 }
             }
         }
 
-        // Build rows dynamically
+        // Build rows dynamically with per-row accordion managers
         let mut is_first_row = true;
         for chunk in toggle_cards.chunks(2) {
             let row = GtkBox::new(Orientation::Horizontal, 8);
@@ -411,8 +463,27 @@ impl QuickSettingsWindow {
             }
             is_first_row = false;
 
+            // Create per-row accordion manager.
+            // Note: row_accordion is not stored in a struct field, but it stays alive
+            // because setup_expander_with_callback captures Rc<AccordionManager> in GTK
+            // signal closures, which are prevent it from being dropped while the buttons exist.
+            let row_accordion = Rc::new(AccordionManager::new());
+
             for tc in chunk {
                 row.append(&tc.card);
+
+                // Register expandable cards with this row's accordion
+                if let (Some(expander_btn), Some(expandable)) =
+                    (&tc.expander_button, &tc.expandable)
+                {
+                    row_accordion.register_dyn(Rc::clone(expandable));
+                    AccordionManager::setup_expander_with_callback(
+                        &row_accordion,
+                        expandable,
+                        expander_btn,
+                        tc.on_toggle.clone(),
+                    );
+                }
             }
 
             // If odd number of cards in this row, add placeholder for consistent sizing
@@ -451,12 +522,17 @@ impl QuickSettingsWindow {
             content.append(&brightness_row);
         }
 
-        outer.append(&content);
+        // Wrap content in the scroll container for height limiting
+        qs.scroll_container.set_child(Some(&content));
+        outer.append(&qs.scroll_container);
         outer
     }
 
     /// Build the Wi-Fi card and its revealer.
-    fn build_wifi_card(qs: &Rc<Self>) -> (GtkBox, Revealer) {
+    ///
+    /// Returns `(card, revealer, expander_button)` - caller is responsible for
+    /// accordion registration via `AccordionManager::setup_expander`.
+    fn build_wifi_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
         let network = NetworkService::global();
         let snapshot = network.snapshot();
 
@@ -526,17 +602,14 @@ impl QuickSettingsWindow {
         *qs.wifi.scan_button.borrow_mut() = Some(wifi_details.scan_button);
         *qs.wifi.scan_label.borrow_mut() = Some(wifi_details.scan_label);
 
-        // Register with accordion and set up expander behavior
-        qs.accordion.register(Rc::clone(&qs.wifi));
-        if let Some(ref expander_btn) = wifi_card.expander_button {
-            AccordionManager::setup_expander(&qs.accordion, &qs.wifi, expander_btn);
-        }
-
-        (wifi_card.card, wifi_revealer)
+        (wifi_card.card, wifi_revealer, wifi_card.expander_button)
     }
 
     /// Build the Bluetooth card and its revealer.
-    fn build_bluetooth_card(qs: &Rc<Self>) -> (GtkBox, Revealer) {
+    ///
+    /// Returns `(card, revealer, expander_button)` - caller is responsible for
+    /// accordion registration via `AccordionManager::setup_expander`.
+    fn build_bluetooth_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
         let bt_service = BluetoothService::global();
         let bt_snapshot = bt_service.snapshot();
 
@@ -608,17 +681,14 @@ impl QuickSettingsWindow {
         *qs.bluetooth.scan_button.borrow_mut() = Some(bt_details.scan_button);
         *qs.bluetooth.scan_label.borrow_mut() = Some(bt_details.scan_label);
 
-        // Register with accordion and set up expander behavior
-        qs.accordion.register(Rc::clone(&qs.bluetooth));
-        if let Some(ref expander_btn) = bt_card.expander_button {
-            AccordionManager::setup_expander(&qs.accordion, &qs.bluetooth, expander_btn);
-        }
-
-        (bt_card.card, bt_revealer)
+        (bt_card.card, bt_revealer, bt_card.expander_button)
     }
 
     /// Build the VPN card and its revealer.
-    fn build_vpn_card(qs: &Rc<Self>) -> (GtkBox, Revealer) {
+    ///
+    /// Returns `(card, revealer, expander_button)` - caller is responsible for
+    /// accordion registration via `AccordionManager::setup_expander`.
+    fn build_vpn_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
         let vpn_service = VpnService::global();
         let vpn_snapshot = vpn_service.snapshot();
 
@@ -683,13 +753,7 @@ impl QuickSettingsWindow {
         *qs.vpn.base.list_box.borrow_mut() = Some(vpn_details.list_box);
         *qs.vpn.base.revealer.borrow_mut() = Some(vpn_revealer.clone());
 
-        // Register with accordion and set up expander behavior
-        qs.accordion.register(Rc::clone(&qs.vpn));
-        if let Some(ref expander_btn) = vpn_card.expander_button {
-            AccordionManager::setup_expander(&qs.accordion, &qs.vpn, expander_btn);
-        }
-
-        (vpn_card.card, vpn_revealer)
+        (vpn_card.card, vpn_revealer, vpn_card.expander_button)
     }
 
     /// Build the Idle Inhibitor card (no revealer needed).
@@ -1008,6 +1072,23 @@ impl QuickSettingsWindow {
         // Calculate and apply top margin
         let top_margin = calculate_qs_top_margin(anchor_y, bar_size, screen_margin, popover_offset);
         self.window.set_margin(Edge::Top, top_margin);
+
+        // Calculate max height for scroll container based on available screen space.
+        // geom.height() is the full screen height, but QS is positioned relative to
+        // the work area (after the bar's exclusive zone). Account for:
+        // - bar_exclusive_zone: bar_size + 2*screen_margin + popover_offset
+        // - container_padding: outer container has padding (16px from surface styles)
+        //   and margin (4px margin_bottom), plus CSS padding-top (4px)
+        // - bottom_margin: desired gap from screen bottom
+        let bottom_margin = 8;
+        let container_padding = 16 + 4 + 4; // surface padding-bottom + margin_bottom + padding-top
+        let bar_exclusive_zone = bar_size + 2 * screen_margin + popover_offset;
+        let max_height =
+            geom.height() - bar_exclusive_zone - top_margin - container_padding - bottom_margin;
+
+        if max_height > 100 {
+            self.scroll_container.set_max_content_height(max_height);
+        }
 
         if anchor_x > 0 {
             let monitor_width = geom.width();

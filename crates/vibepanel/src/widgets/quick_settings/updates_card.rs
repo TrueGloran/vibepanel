@@ -18,8 +18,8 @@ use tracing::debug;
 
 use super::components::ToggleCard;
 use super::ui_helpers::{
-    AccordionManager, ExpandableCard, ExpandableCardBase, build_scan_button, clear_list_box,
-    create_qs_list_box, set_icon_active, set_subtitle_active,
+    ExpandableCard, ExpandableCardBase, build_scan_button, clear_list_box, create_qs_list_box,
+    set_icon_active, set_subtitle_active,
 };
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
@@ -80,10 +80,10 @@ impl ExpandableCard for UpdatesCardState {
 }
 
 /// Build the Updates card and revealer for the Quick Settings panel.
-pub fn build_updates_card(
-    state: &Rc<UpdatesCardState>,
-    accordion: &Rc<AccordionManager>,
-) -> (GtkBox, Revealer) {
+///
+/// Returns `(card, revealer, expander_button)` - caller is responsible for
+/// accordion registration via `AccordionManager::setup_expander`.
+pub fn build_updates_card(state: &Rc<UpdatesCardState>) -> (GtkBox, Revealer, Option<Button>) {
     let snapshot = UpdatesService::global().snapshot();
 
     let subtitle_text = format_repo_summary(&snapshot);
@@ -137,13 +137,7 @@ pub fn build_updates_card(
 
     *state.base.revealer.borrow_mut() = Some(revealer.clone());
 
-    // Register with accordion and set up expander behavior
-    accordion.register(Rc::clone(state));
-    if let Some(ref expander_btn) = card.expander_button {
-        AccordionManager::setup_expander(accordion, state, expander_btn);
-    }
-
-    (card.card, revealer)
+    (card.card, revealer, card.expander_button)
 }
 
 /// Result of building updates details section.

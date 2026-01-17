@@ -78,10 +78,11 @@ pub fn set_subtitle_active(label: &Label, active: bool) {
     }
 }
 
-/// Manages accordion behavior for expandable cards.
+/// Manages accordion behavior for expandable cards within a single row.
 ///
-/// The accordion ensures only one card is expanded at a time. When a card
-/// is expanded, all other registered cards are collapsed instantly.
+/// Each row of cards gets its own `AccordionManager` instance, so cards in
+/// different rows are independent. When a card is expanded, all other cards
+/// **in the same row** are collapsed instantly.
 pub struct AccordionManager {
     /// Registered expandable cards (stored as trait objects).
     cards: RefCell<Vec<Rc<dyn ExpandableCard>>>,
@@ -96,7 +97,13 @@ impl AccordionManager {
     }
 
     /// Register an expandable card with the accordion.
+    #[allow(dead_code)]
     pub fn register<T: ExpandableCard + 'static>(&self, card: Rc<T>) {
+        self.cards.borrow_mut().push(card);
+    }
+
+    /// Register an expandable card trait object with the accordion.
+    pub fn register_dyn(&self, card: Rc<dyn ExpandableCard>) {
         self.cards.borrow_mut().push(card);
     }
 
@@ -126,10 +133,33 @@ impl AccordionManager {
     ///
     /// This connects the expander button to toggle the revealer and
     /// automatically collapse other cards when expanding.
+    #[allow(dead_code)]
     pub fn setup_expander<T: ExpandableCard + 'static>(
         accordion: &Rc<Self>,
         card: &Rc<T>,
         expander_btn: &Button,
+    ) {
+        Self::setup_expander_with_callback(
+            accordion,
+            &(Rc::clone(card) as Rc<dyn ExpandableCard>),
+            expander_btn,
+            None,
+        );
+    }
+
+    /// Set up accordion behavior with an optional post-toggle callback.
+    ///
+    /// This is the more flexible version of `setup_expander` that accepts
+    /// a callback invoked after the revealer and arrow state are updated.
+    /// The callback receives `true` if expanding, `false` if collapsing.
+    ///
+    /// Use this for cards that need custom behavior on expand/collapse,
+    /// such as updating a subtitle label.
+    pub fn setup_expander_with_callback(
+        accordion: &Rc<Self>,
+        card: &Rc<dyn ExpandableCard>,
+        expander_btn: &Button,
+        on_toggle: Option<Rc<dyn Fn(bool)>>,
     ) {
         let accordion = Rc::clone(accordion);
         let revealer = card.base().revealer.borrow().clone();
@@ -155,6 +185,11 @@ impl AccordionManager {
                 } else {
                     arrow.widget().remove_css_class(state::EXPANDED);
                 }
+            }
+
+            // Invoke custom callback if provided
+            if let Some(ref callback) = on_toggle {
+                callback(expanding);
             }
         });
     }
