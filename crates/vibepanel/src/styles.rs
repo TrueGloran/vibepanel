@@ -267,6 +267,9 @@ pub mod qs {
     /// Audio row disabled state (`.qs-audio-row-disabled`).
     pub const AUDIO_ROW_DISABLED: &str = "qs-audio-row-disabled";
 
+    /// Card disabled state - suppresses hover effect (`.qs-card-disabled`).
+    pub const CARD_DISABLED: &str = "qs-card-disabled";
+
     /// Audio hint text (`.qs-audio-hint`).
     pub const AUDIO_HINT: &str = "qs-audio-hint";
 

@@ -483,6 +483,10 @@ window.quick-settings-window {{
     background: var(--color-card-overlay-hover);
 }}
 
+.vp-card.qs-card-disabled:hover {{
+    background: var(--color-card-overlay);
+}}
+
 /* Toggle button fills card and provides its own padding */
 .vp-card > .vp-btn-reset {{
     padding: 8px 10px;

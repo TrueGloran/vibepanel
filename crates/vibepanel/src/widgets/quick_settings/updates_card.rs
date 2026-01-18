@@ -30,9 +30,8 @@ use crate::widgets::updates_common::{
 
 /// State for the Updates card in the Quick Settings panel.
 pub struct UpdatesCardState {
-    /// Common expandable card state (toggle, icon, subtitle, list_box, revealer, arrow).
     pub base: ExpandableCardBase,
-    /// Refresh button.
+    pub card_box: RefCell<Option<GtkBox>>,
     pub refresh_button: RefCell<Option<Button>>,
     /// Refresh button label (for animation).
     pub refresh_label: RefCell<Option<Label>>,
@@ -48,6 +47,7 @@ impl UpdatesCardState {
     pub fn new() -> Self {
         Self {
             base: ExpandableCardBase::new(),
+            card_box: RefCell::new(None),
             refresh_button: RefCell::new(None),
             refresh_label: RefCell::new(None),
             last_check_label: RefCell::new(None),
@@ -104,6 +104,7 @@ pub fn build_updates_card(state: &Rc<UpdatesCardState>) -> (GtkBox, Revealer, Op
     card.card.add_css_class(qs::UPDATES);
 
     // Store references
+    *state.card_box.borrow_mut() = Some(card.card.clone());
     *state.base.toggle.borrow_mut() = Some(card.toggle.clone());
     *state.base.card_icon.borrow_mut() = Some(card.icon_handle.clone());
     *state.base.subtitle.borrow_mut() = card.subtitle.clone();
@@ -221,11 +222,18 @@ pub fn on_updates_changed(state: &UpdatesCardState, snapshot: &UpdatesSnapshot) 
     }
 
     // Update toggle sensitivity
+    let is_actionable = snapshot.available && snapshot.update_count > 0;
     if let Some(toggle) = state.base.toggle.borrow().as_ref() {
-        // Toggle is sensitive when updates are available (so you can upgrade)
-        toggle.set_sensitive(snapshot.available && snapshot.update_count > 0);
-        // Don't keep it active - it's a momentary action
+        toggle.set_sensitive(is_actionable);
         toggle.set_active(false);
+    }
+
+    if let Some(card_box) = state.card_box.borrow().as_ref() {
+        if is_actionable {
+            card_box.remove_css_class(qs::CARD_DISABLED);
+        } else {
+            card_box.add_css_class(qs::CARD_DISABLED);
+        }
     }
 
     // Update refresh button label and animation
