@@ -53,6 +53,8 @@ These examples use roughly ~10–35 lines of TOML to get completely different vi
 VibePanel is in early 0.x development but should be stable enough for daily use.
 Config options and defaults may change between minor releases, check the changelog when upgrading.
 
+If you find a bug or if you're missing a feature, please [open an issue](https://github.com/prankstr/vibepanel/issues)! It's far from perfect yet.
+
 ### Compatibility
 
 - **Compositors:** Hyprland, Niri, MangoWC/DWL. Sway support may be added based on demand.
