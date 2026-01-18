@@ -10,6 +10,7 @@ depends=('gtk4' 'gtk4-layer-shell' 'libpulse' 'upower' 'networkmanager' 'bluez')
 optdepends=('power-profiles-daemon: power profile switching in battery popover')
 provides=('vibepanel')
 conflicts=('vibepanel' 'vibepanel-git')
+options=(!debug)
 source=("vibepanel-${pkgver}::https://github.com/prankstr/vibepanel/releases/download/v${pkgver}/vibepanel-x86_64-unknown-linux-gnu"
         "LICENSE-${pkgver}::https://raw.githubusercontent.com/prankstr/vibepanel/v${pkgver}/LICENSE")
 sha256sums=('bfdaf618952aa68fdf5b344b81f72649db4e9394aa51f2598a4e61e7f163ffdb'
