@@ -67,12 +67,11 @@ label link:active {
     box-shadow: var(--shadow-soft);
 }
 
-/* Make popover shell transparent so our content shows */
-/* Note: border-radius is applied by SurfaceStyleManager::apply_surface_styles() */
 popover.widget-menu {
     background: transparent;
     border: none;
     box-shadow: none;
+    border-radius: var(--radius-surface);
 }
 
 popover.widget-menu > contents,
@@ -80,6 +79,7 @@ popover.widget-menu.background > contents {
     background: transparent;
     border: none;
     box-shadow: none;
+    border-radius: var(--radius-surface);
     padding: 0;
     margin: 0;
 }
