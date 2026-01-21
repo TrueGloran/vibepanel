@@ -333,6 +333,17 @@ fn update_button(state: &Rc<RefCell<WidgetState>>, button: &Button, snapshot: &T
         return;
     }
 
+    // Try loading from custom icon theme path if provided
+    if let Some(name) = icon_name
+        && !name.is_empty()
+        && let Some(theme_path) = &snapshot.icon_theme_path
+        && !theme_path.is_empty()
+        && let Some(texture) = load_icon_from_theme_path(theme_path, name)
+    {
+        image.set_paintable(Some(&texture));
+        return;
+    }
+
     if let Some(name) = icon_name
         && !name.is_empty()
     {
@@ -438,6 +449,43 @@ fn argb_to_rgba(data: &glib::Bytes) -> Vec<u8> {
     }
 
     result
+}
+
+/// Load an icon from a custom theme path provided by the application.
+///
+/// Tries common image extensions (.png, .svg, .xpm) to find the icon file.
+fn load_icon_from_theme_path(theme_path: &str, icon_name: &str) -> Option<gdk::Texture> {
+    use std::path::Path;
+
+    let base_path = Path::new(theme_path);
+    if !base_path.exists() {
+        return None;
+    }
+
+    // Try common extensions
+    for ext in &["png", "svg", "xpm"] {
+        let icon_path = base_path.join(format!("{}.{}", icon_name, ext));
+        if icon_path.exists()
+            && let Ok(texture) = gdk::Texture::from_filename(&icon_path)
+        {
+            debug!("Loaded tray icon from custom path: {}", icon_path.display());
+            return Some(texture);
+        }
+    }
+
+    // Also try without extension (in case icon_name already has it)
+    let direct_path = base_path.join(icon_name);
+    if direct_path.exists()
+        && let Ok(texture) = gdk::Texture::from_filename(&direct_path)
+    {
+        debug!(
+            "Loaded tray icon from custom path: {}",
+            direct_path.display()
+        );
+        return Some(texture);
+    }
+
+    None
 }
 
 fn on_button_clicked(state: &Rc<RefCell<WidgetState>>, button: &Button, identifier: &str) {

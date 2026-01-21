@@ -88,6 +88,8 @@ pub struct TrayItem {
     pub bus_name: String,
     /// If true, left-click should show menu instead of activate.
     pub item_is_menu: bool,
+    /// Custom icon theme path provided by the application.
+    pub icon_theme_path: Option<String>,
 }
 
 /// A single entry in a tray item's context menu.
@@ -1148,6 +1150,8 @@ impl TrayService {
         let item_is_menu = get_prop("ItemIsMenu")
             .and_then(|v| v.get::<bool>())
             .unwrap_or(false);
+        let icon_theme_path =
+            get_prop("IconThemePath").and_then(|v| v.str().map(|s| s.to_string()));
 
         Some(TrayItem {
             identifier: identifier.to_string(),
@@ -1161,6 +1165,7 @@ impl TrayService {
             menu_path,
             bus_name: proxy.name().map(|s| s.to_string()).unwrap_or_default(),
             item_is_menu,
+            icon_theme_path,
         })
     }
 
