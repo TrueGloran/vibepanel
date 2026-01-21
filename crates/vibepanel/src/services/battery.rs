@@ -6,14 +6,19 @@
 //! - Notifies listeners on the GLib main loop with a canonical snapshot.
 
 use std::cell::RefCell;
+use std::fs;
+use std::path::Path;
 use std::rc::Rc;
 
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
-use tracing::error;
+use tracing::{debug, error, warn};
 
 use super::callbacks::Callbacks;
+
+/// Path to the kernel's power supply sysfs directory.
+const POWER_SUPPLY_PATH: &str = "/sys/class/power_supply";
 
 /// DBus constants for the UPower DisplayDevice.
 const UPOWER_NAME: &str = "org.freedesktop.UPower";
@@ -71,8 +76,48 @@ impl BatteryService {
             callbacks: Callbacks::new(),
         });
 
-        Self::init_dbus(&service);
+        if Self::has_battery_device() {
+            Self::init_dbus(&service);
+        } else {
+            warn!("BatteryService: no battery device found; service disabled");
+        }
+
         service
+    }
+
+    /// Check if any battery device exists under /sys/class/power_supply.
+    fn has_battery_device() -> bool {
+        let path = Path::new(POWER_SUPPLY_PATH);
+        if !path.exists() {
+            debug!("BatteryService: {} does not exist", POWER_SUPPLY_PATH);
+            return false;
+        }
+
+        let entries = match fs::read_dir(path) {
+            Ok(it) => it,
+            Err(err) => {
+                debug!(
+                    "BatteryService: failed to read {}: {err}",
+                    POWER_SUPPLY_PATH
+                );
+                return false;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let type_path = entry.path().join("type");
+            if let Ok(content) = fs::read_to_string(&type_path) {
+                if content.trim().eq_ignore_ascii_case("battery") {
+                    return true;
+                }
+            }
+        }
+
+        debug!(
+            "BatteryService: no battery type device found in {}",
+            POWER_SUPPLY_PATH
+        );
+        false
     }
 
     /// Get the global BatteryService singleton.

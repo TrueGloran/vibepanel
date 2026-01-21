@@ -98,8 +98,10 @@ pub use memory::{MemoryConfig, MemoryWidget};
 use gtk4::Widget;
 use gtk4::prelude::*;
 use std::any::Any;
-use tracing::warn;
+use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
+
+use crate::services::battery::BatteryService;
 
 /// Trait for widget configuration types.
 ///
@@ -215,6 +217,10 @@ impl WidgetFactory {
                 })
             }
             "battery" => {
+                if !BatteryService::global().snapshot().available {
+                    debug!("Skipping battery widget: no battery available");
+                    return None;
+                }
                 let cfg = BatteryConfig::from_entry(entry);
                 let battery = BatteryWidget::new(cfg);
                 let root = battery.widget().clone().upcast::<Widget>();
