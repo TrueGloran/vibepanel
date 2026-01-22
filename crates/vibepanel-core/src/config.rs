@@ -1175,8 +1175,12 @@ mod tests {
             "user can set empty widgets"
         );
 
-        // Center should still come from defaults (empty in default config.toml)
-        assert!(config.widgets.center.is_empty());
+        // Center should still come from defaults (media in default config.toml)
+        assert_eq!(config.widgets.center.len(), 1);
+        match &config.widgets.center[0] {
+            WidgetPlacement::Single(name) => assert_eq!(name, "media"),
+            WidgetPlacement::Group { .. } => panic!("expected single widget"),
+        }
     }
 
     #[test]

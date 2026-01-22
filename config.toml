@@ -14,11 +14,11 @@
 [bar]
 size = 32
 border_radius = 30
-background_opacity = 0.0  # 0.0 = transparent (islands), 1.0 = solid
+background_opacity = 0.0 # 0.0 = transparent (islands), 1.0 = solid
 
 [widgets]
 left = ["workspaces", "window_title"]
-center = []
+center = ["media"]
 right = [
   "tray",
   "updates",
@@ -42,16 +42,16 @@ background_opacity = 1.0
 # See documentation for all widget options.
 
 [theme]
-mode = "dark"        # "auto", "dark", "light", "gtk"
-accent = "#adabe0"   # "gtk", "none", or hex color
+mode = "dark"      # "auto", "dark", "light", "gtk"
+accent = "#adabe0" # "gtk", "none", or hex color
 
 [theme.icons]
-theme = "material"  # "material" or "gtk"
-weight = 400        # Material icon stroke weight (100-700)
+theme = "material" # "material" or "gtk"
+weight = 400       # Material icon stroke weight (100-700)
 
 [osd]
 enabled = true
-position = "bottom"  # "bottom", "top", "left", "right"
+position = "bottom" # "bottom", "top", "left", "right"
 
 [advanced]
 # compositor = "auto"  # "auto", "hyprland", "niri", "mango"
