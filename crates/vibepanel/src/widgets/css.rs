@@ -565,6 +565,11 @@ window.quick-settings-window {{
     margin: 3px 0;
 }}
 
+/* Updates list rows use smaller radius for larger card surfaces */
+.qs-updates-list .qs-row {{
+    border-radius: var(--radius-pill);
+}}
+
 /* Row menu content */
 .qs-row-menu-content {{
     font-family: var(--font-family);
@@ -859,6 +864,7 @@ window.quick-settings-window {{
         .notification-row {{
             padding: 6px;
             margin-bottom: 4px;
+            border-radius: var(--radius-pill);
         }}
 
         .notification-row:last-child {{
