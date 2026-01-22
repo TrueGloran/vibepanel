@@ -119,10 +119,25 @@ impl BatteryService {
         };
 
         for entry in entries.flatten() {
-            let type_path = entry.path().join("type");
-            if fs::read_to_string(&type_path)
-                .is_ok_and(|content| content.trim().eq_ignore_ascii_case("battery"))
-            {
+            let entry_path = entry.path();
+            let type_path = entry_path.join("type");
+
+            // Check if this is a battery device
+            let is_battery = fs::read_to_string(&type_path)
+                .is_ok_and(|content| content.trim().eq_ignore_ascii_case("battery"));
+
+            if !is_battery {
+                continue;
+            }
+
+            // Exclude peripheral batteries (e.g., Logitech mice) by checking scope.
+            // System batteries either have scope=System or no scope attribute at all.
+            // Peripheral batteries have scope=Device.
+            let scope_path = entry_path.join("scope");
+            let is_peripheral = fs::read_to_string(&scope_path)
+                .is_ok_and(|content| content.trim().eq_ignore_ascii_case("device"));
+
+            if !is_peripheral {
                 return true;
             }
         }
