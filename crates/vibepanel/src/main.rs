@@ -69,6 +69,11 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+    /// Control media playback (MPRIS)
+    Media {
+        #[command(subcommand)]
+        action: MediaAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -123,6 +128,20 @@ enum VolumeAction {
     Unmute,
     /// Toggle mute state
     ToggleMute,
+}
+
+#[derive(Subcommand, Debug)]
+enum MediaAction {
+    /// Toggle play/pause
+    PlayPause,
+    /// Skip to next track
+    Next,
+    /// Go to previous track
+    Previous,
+    /// Stop playback
+    Stop,
+    /// Show current playback status
+    Status,
 }
 
 fn main() -> ExitCode {
@@ -197,6 +216,7 @@ fn handle_command(command: Command) -> ExitCode {
         Command::Brightness { action } => handle_brightness_command(action),
         Command::Volume { action } => handle_volume_command(action),
         Command::Inhibit { reason, command } => handle_inhibit_command(&reason, &command),
+        Command::Media { action } => handle_media_command(action),
     }
 }
 
@@ -408,6 +428,64 @@ fn handle_inhibit_command(reason: &str, command: &[String]) -> ExitCode {
         }
     }
     // _inhibitor is dropped here, releasing the lock
+}
+
+/// Handle media subcommands using MPRIS D-Bus.
+fn handle_media_command(action: MediaAction) -> ExitCode {
+    use crate::services::media::MediaCli;
+
+    let cli = match MediaCli::new() {
+        Some(c) => c,
+        None => {
+            eprintln!("Error: could not connect to D-Bus session bus");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match action {
+        MediaAction::PlayPause => {
+            if let Err(e) = cli.play_pause() {
+                eprintln!("Error: {}", e);
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        MediaAction::Next => {
+            if let Err(e) = cli.next() {
+                eprintln!("Error: {}", e);
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        MediaAction::Previous => {
+            if let Err(e) = cli.previous() {
+                eprintln!("Error: {}", e);
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        MediaAction::Stop => {
+            if let Err(e) = cli.stop() {
+                eprintln!("Error: {}", e);
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        MediaAction::Status => match cli.status() {
+            Ok(status) => {
+                println!("{}", status);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                ExitCode::FAILURE
+            }
+        },
+    }
 }
 
 /// Initialize and run the GTK4 application.

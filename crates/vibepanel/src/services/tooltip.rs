@@ -383,6 +383,11 @@ impl TooltipManager {
             None => return,
         };
 
+        // Don't show tooltip for hidden widgets
+        if !widget.is_visible() {
+            return;
+        }
+
         // Get monitor info
         let (monitor_width, monitor) = match self.get_monitor_info(&widget) {
             Some(info) => info,
@@ -465,9 +470,26 @@ impl TooltipManager {
     }
 
     /// Cancel pending timer and hide tooltip.
-    fn cancel_and_hide(&self) {
+    ///
+    /// Use this to programmatically dismiss any visible tooltip,
+    /// e.g., when closing a popover or transitioning to a pop-out window.
+    pub fn cancel_and_hide(&self) {
         self.cancel_pending();
         self.hide_tooltip();
+    }
+
+    /// Trigger showing a tooltip for a widget that has been registered with `set_styled_tooltip`.
+    ///
+    /// This is useful when a child widget blocks the parent tooltip and you want to
+    /// re-trigger the parent tooltip when leaving the child.
+    pub fn trigger_tooltip(&self, widget: &impl IsA<gtk4::Widget>) {
+        let widget = widget.as_ref();
+        let widget_addr = widget.as_ptr() as usize;
+
+        if let Some(text) = self.tooltip_texts.borrow().get(&widget_addr) {
+            let text = text.clone();
+            self.schedule_show(widget, &text);
+        }
     }
 
     /// Hide the tooltip window.

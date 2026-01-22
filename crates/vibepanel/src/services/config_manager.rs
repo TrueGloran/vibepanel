@@ -125,6 +125,34 @@ impl ConfigManager {
         palette.sizes.clone()
     }
 
+    /// Get the pill radius (used for rounded indicators, thumbnails, etc.).
+    ///
+    /// This is derived from the widget border radius configuration.
+    /// Used by CSS variable generation in ThemePalette.
+    #[allow(dead_code)]
+    pub fn radius_pill(&self) -> u32 {
+        let config = self.config.borrow();
+        let palette = ThemePalette::from_config(&config);
+        palette.radius_pill
+    }
+
+    /// Get the widget border radius (used for rounded corners on widgets, images, etc.).
+    ///
+    /// This is derived from the widget border radius configuration percentage.
+    pub fn widget_border_radius(&self) -> u32 {
+        let config = self.config.borrow();
+        let palette = ThemePalette::from_config(&config);
+        palette.widget_border_radius
+    }
+
+    /// Get the raw widget border radius percentage (0-100) from config.
+    ///
+    /// This is the raw config value, useful for scaling other elements proportionally.
+    /// At 0% = square, at 100% = maximum rounding (fully round for square elements).
+    pub fn widget_radius_percent(&self) -> u32 {
+        self.config.borrow().widgets.border_radius
+    }
+
     /// Get the bar size (height) from the current configuration.
     pub fn bar_size(&self) -> u32 {
         self.config.borrow().bar.size
@@ -143,6 +171,17 @@ impl ConfigManager {
     /// Get the widget opacity from the current theme configuration.
     pub fn widget_opacity(&self) -> f64 {
         self.config.borrow().widgets.background_opacity
+    }
+
+    /// Get a widget option value from the current configuration.
+    ///
+    /// Returns `None` if the widget has no config section or the option doesn't exist.
+    pub fn get_widget_option(&self, widget_name: &str, option_name: &str) -> Option<toml::Value> {
+        self.config
+            .borrow()
+            .widgets
+            .get_options(widget_name)
+            .and_then(|opts| opts.options.get(option_name).cloned())
     }
 
     /// Start watching the config file for changes.
