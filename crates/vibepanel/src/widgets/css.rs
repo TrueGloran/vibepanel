@@ -462,7 +462,7 @@ calendar.view grid label.week-number {{
 calendar.view grid label.today {{
     background: var(--color-accent-primary);
     color: var(--color-accent-text, #fff);
-    border-radius: var(--radius-pill);
+    border-radius: var(--radius-widget);
     box-shadow: none;
 }}
 
