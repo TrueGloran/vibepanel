@@ -173,9 +173,6 @@ pub mod state {
     /// Muted/disabled audio state (`.muted`).
     pub const MUTED: &str = "muted";
 
-    /// Scanning state label (`.qs-scan-label-scanning`).
-    pub const SCANNING: &str = "qs-scan-label-scanning";
-
     /// Service unavailable state (`.service-unavailable`).
     pub const SERVICE_UNAVAILABLE: &str = "service-unavailable";
 
@@ -258,6 +255,9 @@ pub mod qs {
     /// Scan label (`.qs-scan-label`).
     pub const SCAN_LABEL: &str = "qs-scan-label";
 
+    /// Scan spinner (`.qs-scan-spinner`).
+    pub const SCAN_SPINNER: &str = "qs-scan-spinner";
+
     /// Wi-Fi switch row container (`.qs-wifi-switch-row`).
     pub const WIFI_SWITCH_ROW: &str = "qs-wifi-switch-row";
 
@@ -290,6 +290,15 @@ pub mod qs {
 
     /// Wi-Fi disabled state label (`.qs-wifi-disabled-label`).
     pub const WIFI_DISABLED_LABEL: &str = "qs-wifi-disabled-label";
+
+    /// Generic disabled state container (`.qs-disabled-state`).
+    pub const DISABLED_STATE: &str = "qs-disabled-state";
+
+    /// Generic disabled state icon (`.qs-disabled-state-icon`).
+    pub const DISABLED_STATE_ICON: &str = "qs-disabled-state-icon";
+
+    /// Generic disabled state label (`.qs-disabled-state-label`).
+    pub const DISABLED_STATE_LABEL: &str = "qs-disabled-state-label";
 
     /// Muted placeholder label (`.qs-muted`).
     pub const MUTED_LABEL: &str = "qs-muted";
@@ -346,6 +355,9 @@ pub mod qs {
 
     /// Bluetooth row (`.qs-bt-row`).
     pub const BT_ROW: &str = "qs-bt-row";
+
+    /// Bluetooth controls row (`.qs-bt-controls-row`).
+    pub const BT_CONTROLS_ROW: &str = "qs-bt-controls-row";
 
     // Power card
     /// Power card container (`.qs-power-card`).

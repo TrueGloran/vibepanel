@@ -6,7 +6,7 @@
 //!   - Debounced updates on adapter/device property changes
 //!   - Simple control API: power, scan, connect/disconnect, pair, forget
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk4::gio::{self, BusType, DBusCallFlags, DBusProxy, DBusProxyFlags, prelude::*};
@@ -27,8 +27,9 @@ const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 /// property changes in quick succession; this batches them into one UI update.
 const DEVICE_UPDATE_DEBOUNCE_MS: u64 = 100;
 
-/// Duration (in seconds) after which discovery scan is automatically stopped.
-const SCAN_AUTO_STOP_SECS: u32 = 8;
+/// Duration (in seconds) after which we call StopDiscovery.
+/// BlueZ uses reference counting, so we must stop what we started.
+const SCAN_DURATION_SECS: u32 = 10;
 
 /// A single Bluetooth device exposed by BlueZ.
 #[derive(Debug, Clone)]
@@ -83,8 +84,6 @@ pub struct BluetoothService {
     snapshot: RefCell<BluetoothSnapshot>,
     /// Registered callbacks for snapshot changes.
     callbacks: Callbacks<BluetoothSnapshot>,
-    /// True while a discovery scan is active.
-    scan_in_progress: Cell<bool>,
     /// Debounce source ID for batched state updates.
     debounce_id: RefCell<Option<glib::SourceId>>,
     /// D-Bus signal subscriptions (kept alive for the service lifetime).
@@ -99,7 +98,6 @@ impl BluetoothService {
             object_manager: RefCell::new(None),
             snapshot: RefCell::new(BluetoothSnapshot::empty()),
             callbacks: Callbacks::new(),
-            scan_in_progress: Cell::new(false),
             debounce_id: RefCell::new(None),
             _signal_subscriptions: RefCell::new(Vec::new()),
         });
@@ -340,6 +338,11 @@ impl BluetoothService {
             .and_then(|p| p.cached_property("Powered"))
             .and_then(|v| v.get::<bool>())
             .unwrap_or(false);
+        let discovering = adapter
+            .as_ref()
+            .and_then(|p| p.cached_property("Discovering"))
+            .and_then(|v| v.get::<bool>())
+            .unwrap_or(false);
 
         // Get managed objects to enumerate devices
         let this = BluetoothService::global();
@@ -371,13 +374,18 @@ impl BluetoothService {
                         .and_then(|p| p.cached_property("Powered"))
                         .and_then(|v| v.get::<bool>())
                         .unwrap_or(false);
+                    let discovering = adapter
+                        .as_ref()
+                        .and_then(|p| p.cached_property("Discovering"))
+                        .and_then(|v| v.get::<bool>())
+                        .unwrap_or(false);
 
                     let mut snapshot = this.snapshot.borrow_mut();
                     snapshot.has_adapter = has_adapter;
                     snapshot.powered = powered;
                     snapshot.connected_devices = connected_count;
                     snapshot.devices = devices;
-                    snapshot.scanning = this.scan_in_progress.get();
+                    snapshot.scanning = discovering;
                     snapshot.is_ready = true;
 
                     let snapshot_clone = snapshot.clone();
@@ -390,7 +398,7 @@ impl BluetoothService {
             let mut snapshot = self.snapshot.borrow_mut();
             snapshot.has_adapter = has_adapter;
             snapshot.powered = powered;
-            snapshot.scanning = self.scan_in_progress.get();
+            snapshot.scanning = discovering;
             snapshot.is_ready = true;
 
             let snapshot_clone = snapshot.clone();
@@ -548,20 +556,13 @@ impl BluetoothService {
             return;
         };
 
-        if self.scan_in_progress.get() {
+        // Check if already discovering (BlueZ tracks this via Discovering property)
+        let already_scanning = self.snapshot.borrow().scanning;
+        if already_scanning {
             return;
         }
 
-        self.scan_in_progress.set(true);
-        {
-            let mut snapshot = self.snapshot.borrow_mut();
-            snapshot.scanning = true;
-            let snapshot_clone = snapshot.clone();
-            drop(snapshot);
-            self.callbacks.notify(&snapshot_clone);
-        }
-
-        // Start discovery
+        // Start discovery - BlueZ will emit PropertiesChanged when Discovering changes
         adapter.call(
             "StartDiscovery",
             None,
@@ -575,30 +576,27 @@ impl BluetoothService {
             },
         );
 
-        // Schedule StopDiscovery after timeout to limit scan duration.
+        // Schedule StopDiscovery after timeout.
+        // BlueZ uses reference counting - we must stop what we started.
+        // The actual UI state comes from the Discovering property, not this timeout.
         let this_weak = Rc::downgrade(&BluetoothService::global());
-        glib::timeout_add_seconds_local(SCAN_AUTO_STOP_SECS, move || {
-            if let Some(this) = this_weak.upgrade() {
-                if let Some(adapter) = this.adapter.borrow().clone() {
-                    adapter.call(
-                        "StopDiscovery",
-                        None,
-                        DBusCallFlags::NONE,
-                        5000,
-                        None::<&gio::Cancellable>,
-                        |res| {
-                            if let Err(e) = res {
-                                error!("BluetoothService: StopDiscovery failed: {}", e);
-                            }
-                        },
-                    );
-                }
-                this.scan_in_progress.set(false);
-                let mut snapshot = this.snapshot.borrow_mut();
-                snapshot.scanning = false;
-                let snapshot_clone = snapshot.clone();
-                drop(snapshot);
-                this.callbacks.notify(&snapshot_clone);
+        glib::timeout_add_seconds_local(SCAN_DURATION_SECS, move || {
+            if let Some(this) = this_weak.upgrade()
+                && let Some(adapter) = this.adapter.borrow().clone()
+            {
+                adapter.call(
+                    "StopDiscovery",
+                    None,
+                    DBusCallFlags::NONE,
+                    5000,
+                    None::<&gio::Cancellable>,
+                    |res| {
+                        if let Err(e) = res {
+                            // This can fail if discovery was already stopped - that's fine
+                            tracing::debug!("BluetoothService: StopDiscovery: {}", e);
+                        }
+                    },
+                );
             }
             glib::ControlFlow::Break
         });

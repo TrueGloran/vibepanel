@@ -584,7 +584,7 @@ window.quick-settings-window {{
 
 /* Wi-Fi switch styling - accent colored track when on */
 .qs-wifi-switch-row switch {{
-    border-radius: calc(var(--radius-pill) * 1.3);
+    border-radius: calc(var(--radius-pill) * 1.2);
     margin-bottom: 8px;
 }}
 
@@ -601,6 +601,13 @@ window.quick-settings-window {{
     border-radius: var(--radius-pill);
     min-width: 12px;
     min-height: 12px;
+}}
+
+/* Bluetooth controls row in expanded details */
+.qs-bt-controls-row {{
+    padding: 0 8px;
+    margin-top: 8px;
+    margin-bottom: -4px;
 }}
 
 /* Network empty state (no connections) */
@@ -627,6 +634,20 @@ window.quick-settings-window {{
 }}
 
 .qs-wifi-disabled-label {{
+    font-size: var(--font-size-sm);
+}}
+
+/* Generic disabled state placeholder (used by Bluetooth, etc.) */
+.qs-disabled-state {{
+    padding: 16px;
+}}
+
+.qs-disabled-state-icon {{
+    font-size: 28px;
+    opacity: 0.4;
+}}
+
+.qs-disabled-state-label {{
     font-size: var(--font-size-sm);
 }}
 
@@ -722,16 +743,17 @@ window.quick-settings-window {{
     padding: 2px 8px;
     margin-bottom: 4px;
     min-height: 0;
-    border-radius: var(--radius-pill);
+    border-radius: calc(var(--radius-pill) * 1.3);
 }}
 
 .qs-scan-button:hover {{
     background: var(--color-card-overlay-hover);
 }}
 
-/* Scanning state - state override */
-.qs-scan-label-scanning {{
-    color: var(--color-foreground-muted);
+/* Scan spinner - small inline spinner */
+.qs-scan-spinner {{
+    min-width: 12px;
+    min-height: 12px;
 }}
 
 /* Chevron animation */

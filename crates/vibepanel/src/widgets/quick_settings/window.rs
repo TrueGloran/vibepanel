@@ -621,7 +621,6 @@ impl QuickSettingsWindow {
         *qs.wifi.base.list_box.borrow_mut() = Some(wifi_details.list_box);
         *qs.wifi.base.revealer.borrow_mut() = Some(wifi_revealer.clone());
         *qs.wifi.scan_button.borrow_mut() = Some(wifi_details.scan_button);
-        *qs.wifi.scan_label.borrow_mut() = Some(wifi_details.scan_label);
 
         // Connect Wi-Fi switch to toggle Wi-Fi enabled state
         {
@@ -720,7 +719,6 @@ impl QuickSettingsWindow {
         *qs.bluetooth.base.list_box.borrow_mut() = Some(bt_details.list_box);
         *qs.bluetooth.base.revealer.borrow_mut() = Some(bt_revealer.clone());
         *qs.bluetooth.scan_button.borrow_mut() = Some(bt_details.scan_button);
-        *qs.bluetooth.scan_label.borrow_mut() = Some(bt_details.scan_label);
 
         (bt_card.card, bt_revealer, bt_card.expander_button)
     }

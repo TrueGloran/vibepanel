@@ -6,11 +6,9 @@
 //! - Update list population
 //! - Refresh and upgrade button handlers
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
 
-use gtk4::glib::{self, SourceId};
 use gtk4::pango::{EllipsizeMode, WrapMode};
 use gtk4::prelude::*;
 use gtk4::{Box as GtkBox, Button, Label, Orientation, PolicyType, Revealer, ScrolledWindow};
@@ -18,12 +16,12 @@ use tracing::debug;
 
 use super::components::ToggleCard;
 use super::ui_helpers::{
-    ExpandableCard, ExpandableCardBase, build_scan_button, clear_list_box, create_qs_list_box,
+    ExpandableCard, ExpandableCardBase, ScanButton, clear_list_box, create_qs_list_box,
     set_icon_active, set_subtitle_active,
 };
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
-use crate::styles::{color, qs, row, state};
+use crate::styles::{color, qs, row};
 use crate::widgets::updates_common::{
     format_last_check, format_repo_summary, icon_for_state, spawn_upgrade_terminal,
 };
@@ -32,15 +30,10 @@ use crate::widgets::updates_common::{
 pub struct UpdatesCardState {
     pub base: ExpandableCardBase,
     pub card_box: RefCell<Option<GtkBox>>,
-    pub refresh_button: RefCell<Option<Button>>,
-    /// Refresh button label (for animation).
-    pub refresh_label: RefCell<Option<Label>>,
+    /// Refresh button (self-contained with animation).
+    pub refresh_button: RefCell<Option<Rc<ScanButton>>>,
     /// Last check label in the details.
     pub last_check_label: RefCell<Option<Label>>,
-    /// Animation timer source.
-    pub anim_source: RefCell<Option<SourceId>>,
-    /// Animation step counter.
-    pub anim_step: Cell<u8>,
 }
 
 impl UpdatesCardState {
@@ -49,10 +42,7 @@ impl UpdatesCardState {
             base: ExpandableCardBase::new(),
             card_box: RefCell::new(None),
             refresh_button: RefCell::new(None),
-            refresh_label: RefCell::new(None),
             last_check_label: RefCell::new(None),
-            anim_source: RefCell::new(None),
-            anim_step: Cell::new(0),
         }
     }
 }
@@ -60,16 +50,6 @@ impl UpdatesCardState {
 impl Default for UpdatesCardState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Drop for UpdatesCardState {
-    fn drop(&mut self) {
-        // Cancel any active animation timer
-        if let Some(source_id) = self.anim_source.borrow_mut().take() {
-            source_id.remove();
-            debug!("UpdatesCardState: animation timer cancelled on drop");
-        }
     }
 }
 
@@ -156,20 +136,13 @@ pub fn build_updates_details(state: &Rc<UpdatesCardState>) -> UpdatesDetailsResu
     let top_row = GtkBox::new(Orientation::Horizontal, 8);
 
     // Refresh button (styled like wifi/bluetooth scan button)
-    let scan_result = build_scan_button("Refresh");
-    let refresh_btn = scan_result.button;
-    let refresh_label = scan_result.label;
+    let refresh_btn = ScanButton::with_label("Refresh", || {
+        debug!("Updates: refresh button clicked");
+        UpdatesService::global().refresh();
+    });
 
-    {
-        refresh_btn.connect_clicked(move |_| {
-            debug!("Updates: refresh button clicked");
-            UpdatesService::global().refresh();
-        });
-    }
-
-    top_row.append(&refresh_btn);
+    top_row.append(refresh_btn.widget());
     *state.refresh_button.borrow_mut() = Some(refresh_btn);
-    *state.refresh_label.borrow_mut() = Some(refresh_label);
 
     // Last check label (right side)
     let last_check_label = Label::new(None);
@@ -255,54 +228,9 @@ pub fn on_updates_changed(state: &UpdatesCardState, snapshot: &UpdatesSnapshot) 
 
 /// Update the refresh button UI and animate while checking.
 fn update_refresh_ui(state: &UpdatesCardState, snapshot: &UpdatesSnapshot) {
-    let checking = snapshot.checking;
-
-    // Update label text and CSS
-    if let Some(label) = state.refresh_label.borrow().as_ref() {
-        if checking {
-            label.add_css_class(state::SCANNING);
-        } else {
-            label.set_label("Refresh");
-            label.remove_css_class(state::SCANNING);
-        }
-    }
-
-    // Update button sensitivity
-    if let Some(button) = state.refresh_button.borrow().as_ref() {
-        button.set_sensitive(!checking && snapshot.available);
-    }
-
-    // Manage animation timeout
-    let mut source_opt = state.anim_source.borrow_mut();
-    if checking {
-        if source_opt.is_none() {
-            // Start a simple dot animation: "Checking", "Checking.", ...
-            let step_cell = state.anim_step.clone();
-            let label_weak = state.refresh_label.borrow().as_ref().map(|l| l.downgrade());
-
-            if let Some(label_weak) = label_weak {
-                let source_id = glib::timeout_add_local(Duration::from_millis(450), move || {
-                    if let Some(label) = label_weak.upgrade() {
-                        let step = step_cell.get().wrapping_add(1) % 4;
-                        step_cell.set(step);
-                        let dots = match step {
-                            1 => ".",
-                            2 => "..",
-                            3 => "...",
-                            _ => "",
-                        };
-                        label.set_label(&format!("Checking{}", dots));
-                        glib::ControlFlow::Continue
-                    } else {
-                        glib::ControlFlow::Break
-                    }
-                });
-                *source_opt = Some(source_id);
-            }
-        }
-    } else if let Some(id) = source_opt.take() {
-        id.remove();
-        state.anim_step.set(0);
+    if let Some(refresh_btn) = state.refresh_button.borrow().as_ref() {
+        refresh_btn.set_sensitive(!snapshot.checking && snapshot.available);
+        refresh_btn.set_scanning(snapshot.checking);
     }
 }
 

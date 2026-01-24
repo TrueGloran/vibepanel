@@ -10,19 +10,19 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Button, Label, ListBox, Orientation, Popover, ScrolledWindow};
+use gtk4::{Box as GtkBox, ListBox, Orientation, Popover, ScrolledWindow};
 use tracing::debug;
 
 use super::components::ListRow;
 use super::ui_helpers::{
-    ExpandableCard, ExpandableCardBase, add_placeholder_row, build_accent_subtitle,
-    build_scan_button, clear_list_box, create_qs_list_box, create_row_action_label,
+    ExpandableCard, ExpandableCardBase, ScanButton, add_disabled_placeholder, add_placeholder_row,
+    build_accent_subtitle, clear_list_box, create_qs_list_box, create_row_action_label,
     create_row_menu_action, create_row_menu_button, set_icon_active, set_subtitle_active,
 };
 use crate::services::bluetooth::{BluetoothDevice, BluetoothService, BluetoothSnapshot};
 use crate::services::icons::IconsService;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::styles::{color, icon, qs, row, state, surface};
+use crate::styles::{color, icon, qs, row, surface};
 use crate::widgets::base::configure_popover;
 
 /// Return an icon name matching Bluetooth state.
@@ -46,10 +46,8 @@ pub fn bt_icon_name(powered: bool, connected_devices: usize) -> &'static str {
 pub struct BluetoothCardState {
     /// Common expandable card state (toggle, icon, subtitle, list_box, revealer, arrow).
     pub base: ExpandableCardBase,
-    /// Bluetooth scan button.
-    pub scan_button: RefCell<Option<Button>>,
-    /// Bluetooth scan label.
-    pub scan_label: RefCell<Option<Label>>,
+    /// Bluetooth scan button (self-contained with animation).
+    pub scan_button: RefCell<Option<Rc<ScanButton>>>,
     /// Guard to prevent feedback loop when programmatically updating toggle.
     pub updating_toggle: Cell<bool>,
 }
@@ -59,7 +57,6 @@ impl BluetoothCardState {
         Self {
             base: ExpandableCardBase::new(),
             scan_button: RefCell::new(None),
-            scan_label: RefCell::new(None),
             updating_toggle: Cell::new(false),
         }
     }
@@ -81,26 +78,29 @@ impl ExpandableCard for BluetoothCardState {
 pub struct BluetoothDetailsResult {
     pub container: GtkBox,
     pub list_box: ListBox,
-    pub scan_button: Button,
-    pub scan_label: Label,
+    pub scan_button: Rc<ScanButton>,
 }
 
 /// Build the Bluetooth details section with scan button and device list.
-pub fn build_bluetooth_details(state: &Rc<BluetoothCardState>) -> BluetoothDetailsResult {
+pub fn build_bluetooth_details(_state: &Rc<BluetoothCardState>) -> BluetoothDetailsResult {
     let container = GtkBox::new(Orientation::Vertical, 0);
 
+    // Controls row: spacer + Scan button (right-aligned, matching Wi-Fi layout)
+    let controls_row = GtkBox::new(Orientation::Horizontal, 8);
+    controls_row.add_css_class(qs::BT_CONTROLS_ROW);
+
+    // Spacer to push scan button to the right
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    controls_row.append(&spacer);
+
     // Scan button
-    let scan_result = build_scan_button("Scan");
-    let scan_button = scan_result.button;
-    let scan_label = scan_result.label;
+    let scan_button = ScanButton::new(|| {
+        BluetoothService::global().scan_for_devices();
+    });
 
-    {
-        scan_button.connect_clicked(move |_| {
-            BluetoothService::global().scan_for_devices();
-        });
-    }
-
-    container.append(&scan_button);
+    controls_row.append(scan_button.widget());
+    container.append(&controls_row);
 
     // Device list
     let list_box = create_qs_list_box();
@@ -115,26 +115,30 @@ pub fn build_bluetooth_details(state: &Rc<BluetoothCardState>) -> BluetoothDetai
 
     // Populate with current Bluetooth state
     let snapshot = BluetoothService::global().snapshot();
-    populate_bluetooth_list(state, &list_box, &snapshot);
+    populate_bluetooth_list(&list_box, &snapshot);
 
     BluetoothDetailsResult {
         container,
         list_box,
         scan_button,
-        scan_label,
     }
 }
 
 /// Populate the Bluetooth list with device data from snapshot.
-pub fn populate_bluetooth_list(
-    _state: &BluetoothCardState,
-    list_box: &ListBox,
-    snapshot: &BluetoothSnapshot,
-) {
+pub fn populate_bluetooth_list(list_box: &ListBox, snapshot: &BluetoothSnapshot) {
     clear_list_box(list_box);
 
     if !snapshot.has_adapter {
         add_placeholder_row(list_box, "Bluetooth unavailable");
+        return;
+    }
+
+    if !snapshot.powered {
+        add_disabled_placeholder(
+            list_box,
+            "bluetooth-disabled-symbolic",
+            "Bluetooth is disabled",
+        );
         return;
     }
 
@@ -329,24 +333,16 @@ pub fn on_bluetooth_changed(state: &BluetoothCardState, snapshot: &BluetoothSnap
         set_subtitle_active(label, snapshot.connected_devices > 0);
     }
 
-    // Update scan button UI
-    if let Some(label) = state.scan_label.borrow().as_ref() {
-        if snapshot.scanning {
-            label.set_label("Scanning\u{2026}");
-            label.add_css_class(state::SCANNING);
-        } else {
-            label.set_label("Scan");
-            label.remove_css_class(state::SCANNING);
-        }
-    }
-
-    if let Some(button) = state.scan_button.borrow().as_ref() {
-        button.set_sensitive(snapshot.has_adapter && !snapshot.scanning);
+    // Update scan button: hide when powered off, show otherwise
+    if let Some(scan_btn) = state.scan_button.borrow().as_ref() {
+        scan_btn.set_visible(snapshot.powered);
+        scan_btn.set_sensitive(snapshot.has_adapter && !snapshot.scanning);
+        scan_btn.set_scanning(snapshot.scanning);
     }
 
     // Update device list
     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-        populate_bluetooth_list(state, list_box, snapshot);
+        populate_bluetooth_list(list_box, snapshot);
         // Apply Pango font attrs to dynamically created list rows
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
     }

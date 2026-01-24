@@ -339,6 +339,51 @@ pub fn clear_list_box(list_box: &ListBox) {
     }
 }
 
+/// Add a disabled state placeholder to a list box.
+///
+/// Creates a centered container with an icon and message label.
+/// Used when a service is disabled (e.g., Wi-Fi off, Bluetooth powered off).
+///
+/// # Arguments
+///
+/// * `list_box` - The list box to add the placeholder to
+/// * `icon_name` - The symbolic icon name (e.g., "bluetooth-disabled-symbolic")
+/// * `message` - The message to display (e.g., "Bluetooth is disabled")
+///
+/// # CSS Classes Applied
+///
+/// - `.qs-disabled-state` on the container
+/// - `.qs-disabled-state-icon` and `.vp-muted` on the icon
+/// - `.qs-disabled-state-label` and `.vp-muted` on the label
+pub fn add_disabled_placeholder(list_box: &ListBox, icon_name: &str, message: &str) {
+    let icons = IconsService::global();
+
+    let container = GtkBox::new(Orientation::Vertical, 6);
+    container.add_css_class(qs::DISABLED_STATE);
+    container.set_valign(Align::Center);
+    container.set_halign(Align::Center);
+    container.set_hexpand(true);
+
+    // Icon
+    let icon_handle = icons.create_icon(icon_name, &[qs::DISABLED_STATE_ICON, color::MUTED]);
+    let icon_widget = icon_handle.widget();
+    icon_widget.set_halign(Align::Center);
+    container.append(&icon_widget);
+
+    // Message
+    let label = Label::new(Some(message));
+    label.add_css_class(qs::DISABLED_STATE_LABEL);
+    label.add_css_class(color::MUTED);
+    label.set_halign(Align::Center);
+    label.set_justify(gtk4::Justification::Center);
+    container.append(&label);
+
+    let row = ListBoxRow::new();
+    row.set_child(Some(&container));
+    row.set_activatable(false);
+    list_box.append(&row);
+}
+
 /// Create a new ListBox configured for quick settings panels.
 ///
 /// # CSS Classes Applied
@@ -351,36 +396,99 @@ pub fn create_qs_list_box() -> ListBox {
     list_box
 }
 
-/// Result of building a scan/refresh button.
-pub struct ScanButtonResult {
-    /// The button widget.
-    pub button: Button,
-    /// The label inside the button (for animation updates).
-    pub label: Label,
-}
-
-/// Build a scan/refresh button styled consistently across cards.
+/// Self-contained scan button widget with spinner state.
 ///
-/// This creates the button used in Wi-Fi ("Scan"), Bluetooth ("Scan"),
-/// and Updates ("Refresh") cards. The label can be updated dynamically
-/// for scanning animations.
+/// This provides a consistent scan/refresh button used by Wi-Fi, Bluetooth,
+/// and other cards. It handles:
+/// - Button and label styling
+/// - Spinner shown during active state (label hidden)
+/// - Automatic state management
 ///
 /// # CSS Classes Applied
 ///
 /// - `.qs-scan-button` on the button
 /// - `.qs-scan-label` and `.vp-primary` on the label
-pub fn build_scan_button(label_text: &str) -> ScanButtonResult {
-    let button = Button::new();
-    button.add_css_class(qs::SCAN_BUTTON);
-    button.set_has_frame(false);
-    button.set_halign(Align::Start);
+/// - `.qs-scan-spinner` on the spinner
+pub struct ScanButton {
+    button: Button,
+    label: Label,
+    spinner: gtk4::Spinner,
+}
 
-    let content = GtkBox::new(Orientation::Horizontal, 4);
-    let label = Label::new(Some(label_text));
-    label.add_css_class(qs::SCAN_LABEL);
-    label.add_css_class(color::PRIMARY);
-    content.append(&label);
-    button.set_child(Some(&content));
+impl ScanButton {
+    /// Create a new scan button with default label ("Scan").
+    ///
+    /// The `on_click` callback is invoked when the button is clicked.
+    pub fn new<F>(on_click: F) -> Rc<Self>
+    where
+        F: Fn() + 'static,
+    {
+        Self::with_label("Scan", on_click)
+    }
 
-    ScanButtonResult { button, label }
+    /// Create a new scan button with custom label.
+    ///
+    /// - `label_text`: Label when not scanning (e.g., "Refresh")
+    /// - `on_click`: Callback invoked when the button is clicked
+    pub fn with_label<F>(label_text: &str, on_click: F) -> Rc<Self>
+    where
+        F: Fn() + 'static,
+    {
+        let button = Button::new();
+        button.add_css_class(qs::SCAN_BUTTON);
+        button.set_has_frame(false);
+        button.set_halign(Align::Start);
+
+        let content = GtkBox::new(Orientation::Horizontal, 6);
+
+        let label = Label::new(Some(label_text));
+        label.add_css_class(qs::SCAN_LABEL);
+        label.add_css_class(color::PRIMARY);
+        content.append(&label);
+
+        let spinner = gtk4::Spinner::new();
+        spinner.set_visible(false);
+        spinner.add_css_class(qs::SCAN_SPINNER);
+        content.append(&spinner);
+
+        button.set_child(Some(&content));
+        button.connect_clicked(move |_| on_click());
+
+        Rc::new(Self {
+            button,
+            label,
+            spinner,
+        })
+    }
+
+    /// Get the button widget for adding to a container.
+    pub fn widget(&self) -> &Button {
+        &self.button
+    }
+
+    /// Set button sensitivity.
+    pub fn set_sensitive(&self, sensitive: bool) {
+        self.button.set_sensitive(sensitive);
+    }
+
+    /// Set button visibility.
+    pub fn set_visible(&self, visible: bool) {
+        self.button.set_visible(visible);
+    }
+
+    /// Update active/scanning state.
+    ///
+    /// When `active` is true, hides label and shows spinner.
+    /// When false, hides spinner and shows idle text.
+    pub fn set_scanning(&self, active: bool) {
+        if active {
+            self.label.set_visible(false);
+            self.spinner.set_visible(true);
+            self.spinner.start();
+        } else {
+            self.spinner.stop();
+            self.spinner.set_visible(false);
+            self.label.set_visible(true);
+        }
+    }
 }

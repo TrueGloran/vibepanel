@@ -5,7 +5,6 @@
 //! - Wi-Fi details panel building
 //! - Network list population
 //! - Password dialog handling
-//! - Scan animation
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -20,9 +19,9 @@ use tracing::debug;
 
 use super::components::ListRow;
 use super::ui_helpers::{
-    ExpandableCard, ExpandableCardBase, add_placeholder_row, build_accent_subtitle,
-    build_scan_button, clear_list_box, create_qs_list_box, create_row_action_label,
-    create_row_menu_action, create_row_menu_button, set_icon_active,
+    ExpandableCard, ExpandableCardBase, ScanButton, add_placeholder_row, build_accent_subtitle,
+    clear_list_box, create_qs_list_box, create_row_action_label, create_row_menu_action,
+    create_row_menu_button, set_icon_active,
 };
 use crate::services::icons::IconsService;
 use crate::services::network::{NetworkService, NetworkSnapshot, WifiNetwork};
@@ -201,10 +200,8 @@ pub struct WifiCardState {
     pub title_label: RefCell<Option<Label>>,
     /// Text label in the subtitle (SSID or status).
     pub subtitle_label: RefCell<Option<Label>>,
-    /// The Wi-Fi scan button.
-    pub scan_button: RefCell<Option<Button>>,
-    /// The Wi-Fi scan button label.
-    pub scan_label: RefCell<Option<Label>>,
+    /// The Wi-Fi scan button (self-contained with animation).
+    pub scan_button: RefCell<Option<Rc<ScanButton>>>,
     /// Inline password box.
     pub password_box: RefCell<Option<GtkBox>>,
     /// Label in the password box.
@@ -219,10 +216,6 @@ pub struct WifiCardState {
     pub password_connect_button: RefCell<Option<Button>>,
     /// Target SSID for the inline password prompt.
     pub password_target_ssid: RefCell<Option<String>>,
-    /// Scan animation GLib source ID.
-    pub scan_anim_source: RefCell<Option<glib::SourceId>>,
-    /// Scan animation step counter.
-    pub scan_anim_step: Cell<u8>,
     /// Connect animation GLib source ID.
     pub connect_anim_source: RefCell<Option<glib::SourceId>>,
     /// Connect animation step counter.
@@ -230,6 +223,9 @@ pub struct WifiCardState {
     /// Flag to prevent toggle signal handler from firing during programmatic updates.
     /// This prevents feedback loops when the service notifies us of state changes.
     pub updating_toggle: Cell<bool>,
+    /// The Wi-Fi switch row container (label + switch + scan button).
+    /// Only visible when ethernet device is present (otherwise card toggle controls Wi-Fi).
+    pub wifi_switch_row: RefCell<Option<GtkBox>>,
     /// The Wi-Fi switch in the expanded details section.
     pub wifi_switch: RefCell<Option<Switch>>,
     /// Ethernet row container (shown above Wi-Fi controls when connected).
@@ -243,7 +239,6 @@ impl WifiCardState {
             title_label: RefCell::new(None),
             subtitle_label: RefCell::new(None),
             scan_button: RefCell::new(None),
-            scan_label: RefCell::new(None),
             password_box: RefCell::new(None),
             password_label: RefCell::new(None),
             password_error_label: RefCell::new(None),
@@ -251,11 +246,10 @@ impl WifiCardState {
             password_cancel_button: RefCell::new(None),
             password_connect_button: RefCell::new(None),
             password_target_ssid: RefCell::new(None),
-            scan_anim_source: RefCell::new(None),
-            scan_anim_step: Cell::new(0),
             connect_anim_source: RefCell::new(None),
             connect_anim_step: Cell::new(0),
             updating_toggle: Cell::new(false),
+            wifi_switch_row: RefCell::new(None),
             wifi_switch: RefCell::new(None),
             ethernet_row: RefCell::new(None),
         }
@@ -276,11 +270,6 @@ impl ExpandableCard for WifiCardState {
 
 impl Drop for WifiCardState {
     fn drop(&mut self) {
-        // Cancel any active scan animation timer
-        if let Some(source_id) = self.scan_anim_source.borrow_mut().take() {
-            source_id.remove();
-            debug!("WifiCardState: scan animation timer cancelled on drop");
-        }
         // Cancel any active connect animation timer
         if let Some(source_id) = self.connect_anim_source.borrow_mut().take() {
             source_id.remove();
@@ -293,8 +282,7 @@ impl Drop for WifiCardState {
 pub struct WifiDetailsResult {
     pub container: GtkBox,
     pub list_box: ListBox,
-    pub scan_button: Button,
-    pub scan_label: Label,
+    pub scan_button: Rc<ScanButton>,
     pub wifi_switch: Switch,
 }
 
@@ -316,43 +304,44 @@ pub fn build_wifi_details(
     // Store ethernet row reference for dynamic updates
     *state.ethernet_row.borrow_mut() = Some(ethernet_row);
 
-    // Wi-Fi controls row: Wi-Fi switch + Scan button
-    let wifi_row = GtkBox::new(Orientation::Horizontal, 8);
-    wifi_row.add_css_class(qs::WIFI_SWITCH_ROW);
+    // Wi-Fi switch row: "Wi-Fi" label + switch (only visible when ethernet device present)
+    let wifi_switch_row = GtkBox::new(Orientation::Horizontal, 8);
+    wifi_switch_row.add_css_class(qs::WIFI_SWITCH_ROW);
     // Disable baseline alignment to prevent GTK baseline issues with Switch widget
-    wifi_row.set_baseline_position(gtk4::BaselinePosition::Center);
+    wifi_switch_row.set_baseline_position(gtk4::BaselinePosition::Center);
+    // Only show when ethernet device is present (otherwise card toggle controls Wi-Fi)
+    wifi_switch_row.set_visible(snapshot.has_ethernet_device);
 
     // Wi-Fi label + switch
     let wifi_label = Label::new(Some("Wi-Fi"));
     wifi_label.add_css_class(color::PRIMARY);
     wifi_label.add_css_class(qs::WIFI_SWITCH_LABEL);
     wifi_label.set_valign(gtk4::Align::End);
-    wifi_row.append(&wifi_label);
+    wifi_switch_row.append(&wifi_label);
 
     let wifi_switch = Switch::new();
     wifi_switch.set_valign(gtk4::Align::End);
     wifi_switch.set_active(snapshot.wifi_enabled.unwrap_or(false));
-    wifi_row.append(&wifi_switch);
+    wifi_switch_row.append(&wifi_switch);
+
+    container.append(&wifi_switch_row);
+
+    // Controls row: Scan button (right-aligned)
+    let controls_row = GtkBox::new(Orientation::Horizontal, 8);
+    controls_row.add_css_class(qs::BT_CONTROLS_ROW); // Reuse BT controls row styling
 
     // Spacer to push scan button to the right
     let spacer = GtkBox::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
-    wifi_row.append(&spacer);
+    controls_row.append(&spacer);
 
     // Scan button
-    let scan_result = build_scan_button("Scan");
-    let scan_button = scan_result.button;
-    let scan_label = scan_result.label;
-    scan_button.set_valign(gtk4::Align::End);
+    let scan_button = ScanButton::new(|| {
+        NetworkService::global().scan_networks();
+    });
 
-    {
-        scan_button.connect_clicked(move |_| {
-            NetworkService::global().scan_networks();
-        });
-    }
-
-    wifi_row.append(&scan_button);
-    container.append(&wifi_row);
+    controls_row.append(scan_button.widget());
+    container.append(&controls_row);
 
     // Network list
     let list_box = create_qs_list_box();
@@ -450,7 +439,8 @@ pub fn build_wifi_details(
     *state.password_cancel_button.borrow_mut() = Some(btn_cancel.clone());
     *state.password_connect_button.borrow_mut() = Some(btn_ok.clone());
 
-    // Store switch reference
+    // Store switch references
+    *state.wifi_switch_row.borrow_mut() = Some(wifi_switch_row);
     *state.wifi_switch.borrow_mut() = Some(wifi_switch.clone());
 
     // Populate with current network state
@@ -460,7 +450,6 @@ pub fn build_wifi_details(
         container,
         list_box,
         scan_button,
-        scan_label,
         wifi_switch,
     }
 }
@@ -1118,70 +1107,14 @@ pub fn update_subtitle(state: &WifiCardState, snapshot: &NetworkSnapshot) {
 }
 
 /// Update the scan button UI and animate while scanning.
-pub fn update_scan_ui(
-    state: &WifiCardState,
-    snapshot: &NetworkSnapshot,
-    window: &ApplicationWindow,
-) {
+pub fn update_scan_ui(state: &WifiCardState, snapshot: &NetworkSnapshot) {
     let scanning = snapshot.scanning;
     let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
 
-    // Update label text and CSS
-    if let Some(label) = state.scan_label.borrow().as_ref() {
-        if scanning {
-            label.add_css_class(state::SCANNING);
-        } else {
-            label.set_label("Scan");
-            label.remove_css_class(state::SCANNING);
-        }
-    }
-
-    // Hide button completely when Wi-Fi is off, disable when scanning
-    if let Some(button) = state.scan_button.borrow().as_ref() {
-        button.set_visible(wifi_enabled);
-        button.set_sensitive(!scanning);
-    }
-
-    // Manage animation timeout
-    let mut source_opt = state.scan_anim_source.borrow_mut();
-    if scanning {
-        if source_opt.is_none() {
-            // Start a simple dot animation: "Scanning", "Scanning.", ...
-            let step_cell = state.scan_anim_step.clone();
-            let source_id = glib::timeout_add_local(std::time::Duration::from_millis(450), {
-                let window_weak = window.downgrade();
-                move || {
-                    if let Some(window) = window_weak.upgrade() {
-                        // SAFETY: We store a Weak<QuickSettingsWindow> on the window at creation
-                        // time with key "vibepanel-qs-window". upgrade() returns None if dropped.
-                        unsafe {
-                            if let Some(weak_ptr) = window
-                                .data::<Weak<super::window::QuickSettingsWindow>>(
-                                    "vibepanel-qs-window",
-                                )
-                                && let Some(qs) = weak_ptr.as_ref().upgrade()
-                                && let Some(label) = qs.wifi.scan_label.borrow().as_ref()
-                            {
-                                let step = step_cell.get().wrapping_add(1) % 4;
-                                step_cell.set(step);
-                                let dots = match step {
-                                    1 => ".",
-                                    2 => "..",
-                                    3 => "...",
-                                    _ => "",
-                                };
-                                label.set_label(&format!("Scanning{}", dots));
-                            }
-                        }
-                    }
-                    glib::ControlFlow::Continue
-                }
-            });
-            *source_opt = Some(source_id);
-        }
-    } else if let Some(id) = source_opt.take() {
-        id.remove();
-        state.scan_anim_step.set(0);
+    if let Some(scan_btn) = state.scan_button.borrow().as_ref() {
+        scan_btn.set_visible(wifi_enabled);
+        scan_btn.set_sensitive(!scanning);
+        scan_btn.set_scanning(scanning);
     }
 }
 
@@ -1247,6 +1180,11 @@ pub fn on_network_changed(
         toggle.set_sensitive(snapshot.has_wifi_device && !snapshot.has_ethernet_device);
     }
 
+    // Update Wi-Fi switch row visibility (only show when ethernet device present)
+    if let Some(wifi_switch_row) = state.wifi_switch_row.borrow().as_ref() {
+        wifi_switch_row.set_visible(snapshot.has_ethernet_device);
+    }
+
     // Update Wi-Fi switch in expanded details
     if let Some(wifi_switch) = state.wifi_switch.borrow().as_ref() {
         if wifi_switch.is_active() != enabled {
@@ -1299,7 +1237,7 @@ pub fn on_network_changed(
     update_ethernet_row(state, snapshot);
 
     // Update scan button UI (label + animation)
-    update_scan_ui(state, snapshot, window);
+    update_scan_ui(state, snapshot);
 
     // Update network list - but skip if password dialog is visible to avoid layout shifts
     let password_dialog_visible = state
