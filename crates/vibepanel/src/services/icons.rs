@@ -836,7 +836,18 @@ fn search_desktop_appinfo_by_hint(app_id: &str) -> Option<DesktopAppInfo> {
         }
     }
 
-    // Second pass: partial match on display name or name.
+    // Second pass: exact match on StartupWMClass.
+    // This is the most reliable field for app_id matching since it's specifically
+    // designed to map window manager class hints to desktop entries.
+    for info in &candidates {
+        if let Some(wm_class) = info.string("StartupWMClass")
+            && wm_class.trim().to_lowercase() == base_lower
+        {
+            return Some(info.clone());
+        }
+    }
+
+    // Third pass: partial match on display name or name.
     for info in &candidates {
         let display = info.display_name().trim().to_string();
         let name = if display.is_empty() {
@@ -849,7 +860,7 @@ fn search_desktop_appinfo_by_hint(app_id: &str) -> Option<DesktopAppInfo> {
         }
     }
 
-    // Third pass: partial match on Exec / StartupWMClass / Icon keys.
+    // Fourth pass: partial match on Exec / StartupWMClass / Icon keys.
     for info in &candidates {
         for key in ["Exec", "StartupWMClass", "Icon"] {
             if let Some(value) = info.string(key) {
