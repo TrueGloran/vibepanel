@@ -42,8 +42,8 @@ background_opacity = 1.0
 # See documentation for all widget options.
 
 [theme]
-mode = "dark"      # "auto", "dark", "light", "gtk"
-accent = "#adabe0" # "gtk", "none", or hex color
+mode = "dark" # "auto", "dark", "light", "gtk"
+#accent = "#adabe0" # "gtk", "none", or hex color
 
 [theme.icons]
 theme = "material" # "material" or "gtk"

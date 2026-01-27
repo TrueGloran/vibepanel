@@ -570,7 +570,7 @@ mod tests {
         let old = Config::default();
         let mut new = Config::default();
 
-        new.theme.accent = "#ff0000".to_string();
+        new.theme.accent = Some("#ff0000".to_string());
         assert!(config_theme_changed(&old, &new));
     }
 

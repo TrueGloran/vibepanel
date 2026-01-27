@@ -562,8 +562,15 @@ impl ThemePalette {
             _ => is_dark_color(&self.widget_background), // "auto"
         };
 
-        // Parse accent configuration from the single `theme.accent` field
-        let accent_str = config.theme.accent.as_str();
+        // Parse accent configuration from the single `theme.accent` field.
+        // Smart default: if mode is "gtk" and accent is not specified, default to "gtk".
+        let accent_str = config.theme.accent.as_deref().unwrap_or_else(|| {
+            if config.theme.mode == "gtk" {
+                "gtk"
+            } else {
+                "#adabe0"
+            }
+        });
         self.accent_source = match accent_str {
             "gtk" => AccentSource::Gtk,
             "none" => AccentSource::None,
@@ -948,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_accent_default_is_custom() {
-        // Default accent = "#adabe0" means use custom hex color
+        // Default accent = None with mode = "auto" means use "#adabe0" as custom hex color
         let config = Config::default();
         let palette = ThemePalette::from_config(&config);
 
@@ -959,10 +966,22 @@ mod tests {
     }
 
     #[test]
+    fn test_accent_defaults_to_gtk_when_mode_is_gtk() {
+        // When mode = "gtk" and accent is not specified, accent should default to "gtk"
+        let mut config = Config::default();
+        config.theme.mode = "gtk".to_string();
+        // accent remains None
+
+        let palette = ThemePalette::from_config(&config);
+
+        assert_eq!(palette.accent_source, AccentSource::Gtk);
+    }
+
+    #[test]
     fn test_accent_custom_color() {
         // When accent is a hex color, use it as custom accent
         let mut config = Config::default();
-        config.theme.accent = "#ff0000".to_string();
+        config.theme.accent = Some("#ff0000".to_string());
 
         let palette = ThemePalette::from_config(&config);
 
@@ -980,7 +999,7 @@ mod tests {
     fn test_accent_none_monochrome() {
         // When accent = "none", use monochrome mode
         let mut config = Config::default();
-        config.theme.accent = "none".to_string();
+        config.theme.accent = Some("none".to_string());
 
         let palette = ThemePalette::from_config(&config);
 
@@ -994,7 +1013,7 @@ mod tests {
         // Monochrome mode should use dark colors in light mode
         let mut config = Config::default();
         config.theme.mode = "light".to_string();
-        config.theme.accent = "none".to_string();
+        config.theme.accent = Some("none".to_string());
 
         let palette = ThemePalette::from_config(&config);
 

@@ -210,9 +210,11 @@ impl Config {
             ));
         }
 
-        // Validate theme.accent: must be "gtk", "none", or a valid hex color
-        let accent = self.theme.accent.as_str();
-        if accent != "gtk" && accent != "none" {
+        // Validate theme.accent: must be "gtk", "none", or a valid hex color (if specified)
+        if let Some(ref accent) = self.theme.accent
+            && accent != "gtk"
+            && accent != "none"
+        {
             // Must be a hex color
             let is_valid_hex = accent.starts_with('#') && {
                 let hex = accent.trim_start_matches('#');
@@ -353,7 +355,10 @@ impl Config {
 
         lines.push("\nTheme:".to_string());
         lines.push(format!("  mode: {}", self.theme.mode));
-        lines.push(format!("  accent: {}", self.theme.accent));
+        lines.push(format!(
+            "  accent: {}",
+            self.theme.accent.as_deref().unwrap_or("(auto)")
+        ));
         lines.push(format!(
             "  font_family: {}",
             self.theme.typography.font_family
@@ -928,7 +933,10 @@ pub struct ThemeConfig {
     /// - "gtk": use the GTK theme's accent color (don't override @accent_color)
     /// - "none": monochrome mode (no colored accents)
     /// - "#rrggbb": use this specific color as the accent
-    pub accent: String,
+    ///
+    /// When not specified, defaults to "gtk" if mode is "gtk", otherwise "#adabe0".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
 
     /// State colors (success, warning, urgent).
     pub states: ThemeStates,
@@ -944,7 +952,7 @@ impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
             mode: "auto".to_string(),
-            accent: "#adabe0".to_string(),
+            accent: None,
             states: ThemeStates::default(),
             typography: ThemeTypography::default(),
             icons: ThemeIconsConfig::default(),
@@ -987,7 +995,7 @@ pub struct ThemeTypography {
 impl Default for ThemeTypography {
     fn default() -> Self {
         Self {
-            font_family: "monospace".to_string(),
+            font_family: "\"Cascadia Mono NF\", monospace".to_string(),
         }
     }
 }
@@ -1065,8 +1073,11 @@ mod tests {
         assert_eq!(config.widgets.background_opacity, 1.0);
         assert_eq!(config.advanced.compositor, "auto");
         assert_eq!(config.theme.mode, "auto");
-        assert_eq!(config.theme.accent, "#adabe0");
-        assert_eq!(config.theme.typography.font_family, "monospace");
+        assert!(config.theme.accent.is_none());
+        assert_eq!(
+            config.theme.typography.font_family,
+            "\"Cascadia Mono NF\", monospace"
+        );
         assert_eq!(config.theme.icons.theme, "material");
         assert_eq!(config.theme.icons.weight, 400);
     }
@@ -1197,7 +1208,7 @@ mod tests {
         assert_eq!(config.theme.mode, "light");
 
         // Other theme values should come from defaults
-        assert_eq!(config.theme.accent, "#adabe0");
+        assert_eq!(config.theme.icons.theme, "material");
         // bar.background_opacity comes from bar section defaults
         assert_eq!(config.bar.background_opacity, 0.0);
     }
