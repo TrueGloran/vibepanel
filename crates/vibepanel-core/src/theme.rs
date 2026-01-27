@@ -54,7 +54,7 @@ const DEFAULT_WIDGET_BG_LIGHT: &str = "#ffffff";
 const DEFAULT_STATE_SUCCESS: &str = "#4a7a4a";
 const DEFAULT_STATE_WARNING: &str = "#e5c07b";
 const DEFAULT_STATE_URGENT: &str = "#ff6b6b";
-const DEFAULT_FONT_FAMILY: &str = "\"Cascadia Mono NF\", monospace";
+const DEFAULT_FONT_FAMILY: &str = "monospace";
 
 // Size scaling factors (empirically tuned for visual balance at bar sizes 28-60px)
 const FONT_SCALE: f64 = 0.6;

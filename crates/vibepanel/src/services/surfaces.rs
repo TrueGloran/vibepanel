@@ -35,7 +35,7 @@ fn default_surface_styles() -> SurfaceStyles {
     SurfaceStyles {
         background_color: "#111217".to_string(),
         text_color: "#ffffff".to_string(),
-        font_family: "\"Cascadia Mono NF\", monospace".to_string(),
+        font_family: "monospace".to_string(),
         font_size: 14,
         border_radius: 8,
         border_color: "rgba(255, 255, 255, 0.10)".to_string(),

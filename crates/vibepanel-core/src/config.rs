@@ -995,7 +995,7 @@ pub struct ThemeTypography {
 impl Default for ThemeTypography {
     fn default() -> Self {
         Self {
-            font_family: "\"Cascadia Mono NF\", monospace".to_string(),
+            font_family: "monospace".to_string(),
         }
     }
 }
@@ -1074,10 +1074,7 @@ mod tests {
         assert_eq!(config.advanced.compositor, "auto");
         assert_eq!(config.theme.mode, "auto");
         assert!(config.theme.accent.is_none());
-        assert_eq!(
-            config.theme.typography.font_family,
-            "\"Cascadia Mono NF\", monospace"
-        );
+        assert_eq!(config.theme.typography.font_family, "monospace");
         assert_eq!(config.theme.icons.theme, "material");
         assert_eq!(config.theme.icons.weight, 400);
     }
