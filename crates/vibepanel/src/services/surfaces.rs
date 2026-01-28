@@ -364,7 +364,7 @@ popover.widget-menu.background {{
     background-image: none;
     border: none;
     border-radius: {radius};
-    box-shadow: {shadow};
+    box-shadow: none;
 }}
 
 popover.widget-menu > contents,
@@ -378,8 +378,8 @@ popover.widget-menu.background > contents {{
     font-size: var(--font-size);
     color: var(--color-foreground-primary);
     {padding}
-    margin: 0;
-    box-shadow: none;
+    margin: 6px;
+    box-shadow: {shadow};
 }}
 
 popover.widget-menu > arrow,
@@ -403,13 +403,22 @@ popover.widget-menu.background * {{
             )
         } else {
             // Check if widget has the widget-menu-content class - if so, use
-            // that as the selector for more specific targeting.
+            // that as the selector for more specific targeting. These inner panels
+            // should NOT get a shadow since popover contents node handles that.
             let has_menu_content_class = widget.has_css_class(surface::WIDGET_MENU_CONTENT);
 
             let selector = if has_menu_content_class {
                 format!(".{}", surface::WIDGET_MENU_CONTENT)
             } else {
                 css_name.to_string()
+            };
+
+            // Inner popover panels (.widget-menu-content) don't need shadow -
+            // the popover's contents node handles that. Other surfaces get shadow.
+            let shadow_css = if has_menu_content_class {
+                "none".to_string()
+            } else {
+                styles.shadow.clone()
             };
 
             format!(
@@ -433,7 +442,7 @@ popover.widget-menu.background * {{
                 bg = bg,
                 font = styles.font_family,
                 padding = padding_css,
-                shadow = styles.shadow,
+                shadow = shadow_css,
                 radius = radius,
             )
         };

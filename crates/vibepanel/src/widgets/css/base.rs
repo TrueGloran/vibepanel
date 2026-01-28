@@ -115,10 +115,10 @@ popover.widget-menu > contents,
 popover.widget-menu.background > contents {{
     background: transparent;
     border: none;
-    box-shadow: none;
+    box-shadow: var(--shadow-soft);
     border-radius: var(--radius-surface);
     padding: 0;
-    margin: 0;
+    margin: 6px;
 }}
 
 /* ===== FOCUS SUPPRESSION ===== */
