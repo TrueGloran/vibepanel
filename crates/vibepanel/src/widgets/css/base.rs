@@ -118,7 +118,7 @@ popover.widget-menu.background > contents {{
     box-shadow: var(--shadow-soft);
     border-radius: var(--radius-surface);
     padding: 0;
-    margin: 6px;
+    margin: 0 6px 6px 6px;
 }}
 
 /* ===== FOCUS SUPPRESSION ===== */

@@ -378,7 +378,7 @@ popover.widget-menu.background > contents {{
     font-size: var(--font-size);
     color: var(--color-foreground-primary);
     {padding}
-    margin: 6px;
+    margin: 0 6px 6px 6px;
     box-shadow: {shadow};
 }}
 
