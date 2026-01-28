@@ -3,56 +3,15 @@
 //! Each widget is a self-contained GTK4 component that displays
 //! some piece of information (time, battery status, etc.).
 //!
-//! The `WidgetFactory` is used to construct widgets from config entries,
+//! The `WidgetFactory` constructs widgets from config entries,
 //! and `BarState` owns the widget handles to keep them alive.
 //!
-//! # Widget Configuration Pattern
+//! # Widget Configuration
 //!
-//! All widget configurations implement the `WidgetConfig` trait, which provides
-//! a standard interface for parsing configuration from TOML entries:
-//!
-//! ```ignore
-//! pub struct MyWidgetConfig {
-//!     pub some_option: bool,
-//!     /// Custom background color for this widget (inherited from WidgetEntry).
-//!     pub background_color: Option<String>,
-//! }
-//!
-//! impl WidgetConfig for MyWidgetConfig {
-//!     fn from_entry(entry: &WidgetEntry) -> Self {
-//!         warn_unknown_options("my_widget", entry, &["some_option"]);
-//!         let some_option = entry
-//!             .options
-//!             .get("some_option")
-//!             .and_then(|v| v.as_bool())
-//!             .unwrap_or(true);
-//!         Self {
-//!             some_option,
-//!             background_color: entry.background_color.clone(),  // Always clone background_color from entry
-//!         }
-//!     }
-//! }
-//!
-//! impl Default for MyWidgetConfig {
-//!     fn default() -> Self {
-//!         Self {
-//!             some_option: true,
-//!             background_color: None,
-//!         }
-//!     }
-//! }
-//! ```
-//!
-//! When constructing the widget, pass the background_color to `BaseWidget::new()`:
-//!
-//! ```ignore
-//! impl MyWidget {
-//!     pub fn new(config: MyWidgetConfig) -> Self {
-//!         let base = BaseWidget::new(&[widget::MY_WIDGET], config.background_color.clone());
-//!         // ... rest of widget construction
-//!     }
-//! }
-//! ```
+//! Widget configs implement the `WidgetConfig` trait for parsing from TOML.
+//! The first CSS class passed to `BaseWidget::new()` determines the widget's
+//! identity for per-widget styling (e.g., `[widgets.clock].background_color`).
+//! This class is also used to generate popover class names like `clock-popover`.
 
 mod base;
 mod battery;
@@ -85,7 +44,6 @@ pub mod css;
 pub mod quick_settings;
 
 pub use base::BaseWidget;
-pub use base::apply_widget_color;
 pub use battery::{BatteryConfig, BatteryWidget};
 pub use clock::{ClockConfig, ClockWidget};
 pub use media::{MediaConfig, MediaWidget};
@@ -115,20 +73,12 @@ use crate::services::battery::BatteryService;
 /// All widget configs should implement this trait to provide a consistent
 /// interface for constructing configuration from TOML entries and defaulting.
 ///
-/// # Background Color Field
-///
-/// All widget configs should include a `background_color: Option<String>` field and copy it
-/// from `entry.background_color.clone()` in `from_entry()`. This enables per-widget background
-/// color customization. The background_color should be passed to `BaseWidget::new()` during
-/// widget construction so it applies to both the widget and its popovers.
-///
 /// # Example
 ///
 /// ```ignore
 /// #[derive(Debug, Clone)]
 /// pub struct MyWidgetConfig {
 ///     pub enabled: bool,
-///     pub background_color: Option<String>,
 /// }
 ///
 /// impl WidgetConfig for MyWidgetConfig {
@@ -139,19 +89,13 @@ use crate::services::battery::BatteryService;
 ///             .get("enabled")
 ///             .and_then(|v| v.as_bool())
 ///             .unwrap_or(true);
-///         Self {
-///             enabled,
-///             background_color: entry.background_color.clone(),
-///         }
+///         Self { enabled }
 ///     }
 /// }
 ///
 /// impl Default for MyWidgetConfig {
 ///     fn default() -> Self {
-///         Self {
-///             enabled: true,
-///             background_color: None,
-///         }
+///         Self { enabled: true }
 ///     }
 /// }
 /// ```
@@ -160,7 +104,6 @@ pub trait WidgetConfig: Sized + Default {
     ///
     /// Implementations should extract options from `entry.options` and
     /// fall back to sensible defaults for missing or invalid values.
-    /// Always include `background_color: entry.background_color.clone()` to support per-widget colors.
     fn from_entry(entry: &WidgetEntry) -> Self;
 }
 

@@ -174,11 +174,6 @@ impl ConfigManager {
         self.config.borrow().bar.popover_offset
     }
 
-    /// Get the widget opacity from the current theme configuration.
-    pub fn widget_opacity(&self) -> f64 {
-        self.config.borrow().widgets.background_opacity
-    }
-
     /// Get a widget option value from the current configuration.
     ///
     /// Returns `None` if the widget has no config section or the option doesn't exist.
@@ -442,6 +437,14 @@ impl ConfigManager {
     }
 }
 
+/// Check if per-widget style overrides have changed (triggers CSS-only reload).
+///
+/// This detects when widget-specific styling options (like `background_color`)
+/// are added, removed, or changed in `[widgets.xxx]` sections.
+fn per_widget_styles_changed(old: &Config, new: &Config) -> bool {
+    old.widgets.widget_configs != new.widgets.widget_configs
+}
+
 /// Check if theme-related config has changed.
 fn config_theme_changed(old: &Config, new: &Config) -> bool {
     old.theme.mode != new.theme.mode
@@ -460,6 +463,8 @@ fn config_theme_changed(old: &Config, new: &Config) -> bool {
         || old.bar.size != new.bar.size
         // advanced.pango_font_rendering affects how fonts are applied
         || old.advanced.pango_font_rendering != new.advanced.pango_font_rendering
+        // Per-widget style overrides (background_color, etc.)
+        || per_widget_styles_changed(old, new)
 }
 
 /// Check if structural configuration has changed (requires bar rebuild).
