@@ -50,6 +50,48 @@ sectioned-bar.bar {{
     min-height: var(--widget-height);
 }}
 
+/* Widget groups - remove padding so hover can extend to edges */
+.widget.widget-group {{
+    padding: 0;
+}}
+
+/* Widget hover state - standalone widgets */
+.widget:not(.widget-group):hover {{
+    background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
+}}
+
+/* Widget items inside groups - restore vertical padding */
+.widget-group > .content > .widget-item {{
+    padding-top: var(--widget-padding-y);
+    padding-bottom: var(--widget-padding-y);
+}}
+
+/* Widget items inside groups - edge padding */
+.widget-group > .content > .widget-item:first-child {{
+    padding-left: 10px;
+}}
+
+.widget-group > .content > .widget-item:last-child {{
+    padding-right: 10px;
+}}
+
+/* Widget items inside groups - individual hover targets */
+.widget-group > .content > .widget-item:hover {{
+    background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
+}}
+
+/* First widget in group - round left edges */
+.widget-group > .content > .widget-item:first-child:hover {{
+    border-top-left-radius: var(--radius-widget);
+    border-bottom-left-radius: var(--radius-widget);
+}}
+
+/* Last widget in group - round right edges */
+.widget-group > .content > .widget-item:last-child:hover {{
+    border-top-right-radius: var(--radius-widget);
+    border-bottom-right-radius: var(--radius-widget);
+}}
+
 /* Spacing between items inside widgets */
 .widget > .content > *:not(:last-child),
 .widget-group > .content .content > *:not(:last-child) {{

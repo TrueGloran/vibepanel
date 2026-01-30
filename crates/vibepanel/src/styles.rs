@@ -18,6 +18,11 @@ pub mod class {
     /// Base widget container class (`.widget`).
     pub const WIDGET: &str = "widget";
 
+    /// Widget item class (`.widget-item`).
+    /// Applied to individual widget containers. Remains on widgets even when grouped,
+    /// enabling per-widget hover effects within groups.
+    pub const WIDGET_ITEM: &str = "widget-item";
+
     /// Widget group container class (`.widget-group`).
     /// Applied to shared island containers that hold multiple grouped widgets.
     pub const WIDGET_GROUP: &str = "widget-group";

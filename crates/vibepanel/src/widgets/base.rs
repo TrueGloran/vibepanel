@@ -236,6 +236,7 @@ impl BaseWidget {
     pub fn new(extra_classes: &[&str]) -> Self {
         let container = GtkBox::new(Orientation::Horizontal, 0);
         container.add_css_class(class::WIDGET);
+        container.add_css_class(class::WIDGET_ITEM);
         container.set_hexpand(false);
         for cls in extra_classes {
             container.add_css_class(cls);
