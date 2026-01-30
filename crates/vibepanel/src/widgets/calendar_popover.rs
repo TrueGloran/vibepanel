@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use chrono::{Datelike, Local, NaiveDate};
@@ -17,6 +17,8 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     // month arithmetic is simpler and avoids invalid dates like 31 Feb).
     let today: NaiveDate = Local::now().date_naive();
     let current_date = Rc::new(RefCell::new(today));
+    // Flag to prevent signal handler from interfering during programmatic updates
+    let updating = Rc::new(Cell::new(false));
 
     // Main container
     let container = GtkBox::new(Orientation::Vertical, 0);
@@ -84,12 +86,25 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     // the logical date representing the visible month.
     let update_calendar = {
         let calendar = calendar.clone();
+        let updating = updating.clone();
         move |today: NaiveDate, date: NaiveDate| {
+            let is_current_month = date.month() == today.month() && date.year() == today.year();
+
+            // Set flag to prevent signal handler from interfering
+            updating.set(true);
+
+            // Always set day to 1 first to avoid invalid intermediate states (e.g., Feb 30).
+            // This ensures month/year changes never fail due to the current day being invalid.
+            calendar.set_day(1);
             calendar.set_year(date.year());
             // GtkCalendar expects month in the 0-11 range (i32)
             calendar.set_month(date.month0() as i32);
+            // Now set the actual day (today's day if current month, otherwise keep at 1)
+            if is_current_month {
+                calendar.set_day(today.day() as i32);
+            }
 
-            let is_current_month = date.month() == today.month() && date.year() == today.year();
+            updating.set(false);
 
             if is_current_month {
                 calendar.add_css_class(cal::SHOW_TODAY);
@@ -121,17 +136,20 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
         let update_header = update_header.clone();
         let update_calendar = update_calendar.clone();
         prev_button.connect_clicked(move |_| {
-            let mut date = current_date.borrow_mut();
-            let mut year = date.year();
-            let mut month = date.month();
-            if month == 1 {
-                month = 12;
-                year -= 1;
-            } else {
-                month -= 1;
-            }
-            if let Some(new_date) = NaiveDate::from_ymd_opt(year, month, 1) {
-                *date = new_date;
+            let new_date = {
+                let date = current_date.borrow();
+                let mut year = date.year();
+                let mut month = date.month();
+                if month == 1 {
+                    month = 12;
+                    year -= 1;
+                } else {
+                    month -= 1;
+                }
+                NaiveDate::from_ymd_opt(year, month, 1)
+            };
+            if let Some(new_date) = new_date {
+                *current_date.borrow_mut() = new_date;
                 update_header(new_date);
                 update_calendar(today, new_date);
             }
@@ -151,17 +169,20 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
         let update_header = update_header.clone();
         let update_calendar = update_calendar.clone();
         next_button.connect_clicked(move |_| {
-            let mut date = current_date.borrow_mut();
-            let mut year = date.year();
-            let mut month = date.month();
-            if month == 12 {
-                month = 1;
-                year += 1;
-            } else {
-                month += 1;
-            }
-            if let Some(new_date) = NaiveDate::from_ymd_opt(year, month, 1) {
-                *date = new_date;
+            let new_date = {
+                let date = current_date.borrow();
+                let mut year = date.year();
+                let mut month = date.month();
+                if month == 12 {
+                    month = 1;
+                    year += 1;
+                } else {
+                    month += 1;
+                }
+                NaiveDate::from_ymd_opt(year, month, 1)
+            };
+            if let Some(new_date) = new_date {
+                *current_date.borrow_mut() = new_date;
                 update_header(new_date);
                 update_calendar(today, new_date);
             }
@@ -178,11 +199,23 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
         let current_date = current_date.clone();
         let update_header = update_header.clone();
         let update_calendar = update_calendar.clone();
+        let updating = updating.clone();
         calendar.connect_day_selected(move |cal: &Calendar| {
+            // Skip if we're in a programmatic update
+            if updating.get() {
+                return;
+            }
+
             let year = cal.year();
             // GtkCalendar months are 0-11
-            let month = cal.month() + 1;
-            if let Some(date) = NaiveDate::from_ymd_opt(year, month as u32, 1) {
+            let month = (cal.month() + 1) as u32;
+            let current = *current_date.borrow();
+
+            // Only update if the calendar's month/year differs from our tracked state
+            // (i.e., user clicked a day in a different month)
+            if (month != current.month() || year != current.year())
+                && let Some(date) = NaiveDate::from_ymd_opt(year, month, 1)
+            {
                 *current_date.borrow_mut() = date;
                 update_header(date);
                 update_calendar(today, date);
