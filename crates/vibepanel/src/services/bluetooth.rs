@@ -18,7 +18,6 @@ use super::callbacks::Callbacks;
 
 // BlueZ D-Bus constants
 const BLUEZ_SERVICE: &str = "org.bluez";
-const ADAPTER_PATH: &str = "/org/bluez/hci0";
 const ADAPTER_IFACE: &str = "org.bluez.Adapter1";
 const DEVICE_IFACE: &str = "org.bluez.Device1";
 const OBJECT_MANAGER_IFACE: &str = "org.freedesktop.DBus.ObjectManager";
@@ -248,8 +247,10 @@ impl BluetoothSnapshot {
 pub struct BluetoothService {
     /// System bus connection.
     connection: RefCell<Option<gio::DBusConnection>>,
-    /// Primary adapter proxy (hci0).
+    /// Primary adapter proxy (dynamically discovered).
     adapter: RefCell<Option<DBusProxy>>,
+    /// Current adapter object path (e.g. /org/bluez/hci0).
+    adapter_path: RefCell<Option<String>>,
     /// ObjectManager proxy at /
     object_manager: RefCell<Option<DBusProxy>>,
     /// Current snapshot of Bluetooth state.
@@ -273,6 +274,7 @@ impl BluetoothService {
         let service = Rc::new(Self {
             connection: RefCell::new(None),
             adapter: RefCell::new(None),
+            adapter_path: RefCell::new(None),
             object_manager: RefCell::new(None),
             snapshot: RefCell::new(BluetoothSnapshot::empty()),
             callbacks: Callbacks::new(),
@@ -414,61 +416,13 @@ impl BluetoothService {
                     match res {
                         Ok(proxy) => {
                             this.object_manager.replace(Some(proxy));
+                            this.update_state();
                         }
                         Err(e) => {
                             error!(
                                 "BluetoothService: failed to create ObjectManager proxy: {}",
                                 e
                             );
-                        }
-                    }
-                },
-            );
-
-            // Create Adapter1 proxy
-            let this_weak6 = Rc::downgrade(&this);
-            DBusProxy::new(
-                &connection,
-                DBusProxyFlags::NONE,
-                None,
-                Some(BLUEZ_SERVICE),
-                ADAPTER_PATH,
-                ADAPTER_IFACE,
-                None::<&gio::Cancellable>,
-                move |res| {
-                    let this = match this_weak6.upgrade() {
-                        Some(s) => s,
-                        None => return,
-                    };
-
-                    match res {
-                        Ok(proxy) => {
-                            // Monitor for BlueZ service appearing/disappearing.
-                            let this_weak = Rc::downgrade(&this);
-                            proxy.connect_local("notify::g-name-owner", false, move |values| {
-                                let this = this_weak.upgrade()?;
-                                let proxy = values[0].get::<gio::DBusProxy>().ok();
-                                let has_owner = proxy.and_then(|p| p.name_owner()).is_some();
-                                if has_owner {
-                                    // Service reappeared - refresh state.
-                                    this.update_state();
-                                } else {
-                                    // Service disappeared - mark unavailable.
-                                    this.set_unavailable();
-                                }
-                                None
-                            });
-
-                            this.adapter.replace(Some(proxy));
-                            this.update_state();
-
-                            // Register the BlueZ agent for pairing authentication
-                            Self::register_agent(&this);
-                        }
-                        Err(e) => {
-                            // No adapter might be normal (no Bluetooth hardware)
-                            error!("BluetoothService: failed to create Adapter1 proxy: {}", e);
-                            this.update_state();
                         }
                     }
                 },
@@ -958,6 +912,7 @@ impl BluetoothService {
 
         // Clear proxies.
         self.adapter.replace(None);
+        self.adapter_path.replace(None);
         self.object_manager.replace(None);
 
         // Unregister agent from D-Bus so it can re-register when BlueZ returns.
@@ -1028,7 +983,10 @@ impl BluetoothService {
                     };
 
                     let devices = match res {
-                        Ok(result) => this.parse_managed_objects(&result),
+                        Ok(result) => {
+                            this.ensure_adapter_from_managed_objects(&result);
+                            this.parse_managed_objects(&result)
+                        }
                         Err(_) => Vec::new(),
                     };
 
@@ -1096,6 +1054,103 @@ impl BluetoothService {
                 s.is_ready = true;
             });
         }
+    }
+
+    fn ensure_adapter_from_managed_objects(self: &Rc<Self>, result: &Variant) {
+        let adapter_paths = self.find_adapter_paths(result);
+        let desired_path = adapter_paths.into_iter().next();
+
+        match desired_path {
+            Some(path) => {
+                let current_path = self.adapter_path.borrow().clone();
+                let has_proxy = self.adapter.borrow().is_some();
+
+                if current_path.as_deref() == Some(path.as_str()) && has_proxy {
+                    return;
+                }
+
+                let Some(connection) = self.connection.borrow().clone() else {
+                    return;
+                };
+
+                let path_for_closure = path.clone();
+                let this_weak = Rc::downgrade(self);
+                DBusProxy::new(
+                    &connection,
+                    DBusProxyFlags::NONE,
+                    None,
+                    Some(BLUEZ_SERVICE),
+                    &path,
+                    ADAPTER_IFACE,
+                    None::<&gio::Cancellable>,
+                    move |res| {
+                        let this = match this_weak.upgrade() {
+                            Some(s) => s,
+                            None => return,
+                        };
+
+                        match res {
+                            Ok(proxy) => {
+                                // Monitor for BlueZ service appearing/disappearing.
+                                let this_weak2 = Rc::downgrade(&this);
+                                proxy.connect_local("notify::g-name-owner", false, move |values| {
+                                    let this = this_weak2.upgrade()?;
+                                    let proxy = values[0].get::<gio::DBusProxy>().ok();
+                                    let has_owner = proxy.and_then(|p| p.name_owner()).is_some();
+                                    if has_owner {
+                                        this.update_state();
+                                    } else {
+                                        this.set_unavailable();
+                                    }
+                                    None
+                                });
+
+                                this.adapter.replace(Some(proxy));
+                                *this.adapter_path.borrow_mut() = Some(path_for_closure);
+                                this.update_state();
+                                Self::register_agent(&this);
+                            }
+                            Err(e) => {
+                                error!(
+                                    "BluetoothService: failed to create Adapter1 proxy from ObjectManager: {}",
+                                    e
+                                );
+                            }
+                        }
+                    },
+                );
+            }
+            None => {
+                self.adapter.replace(None);
+                self.adapter_path.replace(None);
+            }
+        }
+    }
+
+    fn find_adapter_paths(&self, result: &Variant) -> Vec<String> {
+        let mut paths = Vec::new();
+
+        let dict = result.child_value(0);
+        let n = dict.n_children();
+        for i in 0..n {
+            let entry = dict.child_value(i);
+            let path: Option<String> = entry.child_value(0).get();
+            let Some(path) = path else { continue };
+
+            let ifaces = entry.child_value(1);
+            let n_ifaces = ifaces.n_children();
+            for j in 0..n_ifaces {
+                let iface_entry = ifaces.child_value(j);
+                let iface_name: Option<String> = iface_entry.child_value(0).get();
+                if iface_name.as_deref() == Some(ADAPTER_IFACE) {
+                    paths.push(path.clone());
+                    break;
+                }
+            }
+        }
+
+        paths.sort();
+        paths
     }
 
     fn parse_managed_objects(&self, result: &Variant) -> Vec<BluetoothDevice> {
