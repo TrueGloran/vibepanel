@@ -33,10 +33,10 @@ use vibepanel_core::config::WidgetEntry;
 /// cards they don't need in their config.toml:
 ///
 /// ```toml
-/// [[widgets.right]]
-/// name = "quick_settings"
+/// [widgets.quick_settings]
 /// vpn = false
 /// idle_inhibitor = false
+/// vpn_close_on_connect = true  # close panel when VPN connects successfully
 /// ```
 #[derive(Debug, Clone)]
 pub struct QuickSettingsCardsConfig {
@@ -49,6 +49,9 @@ pub struct QuickSettingsCardsConfig {
     pub mic: bool,
     pub brightness: bool,
     pub power: bool,
+    /// Close the Quick Settings panel when a VPN connection succeeds.
+    /// Defaults to `true`. Useful when VPN connections trigger password prompts.
+    pub vpn_close_on_connect: bool,
 }
 
 impl Default for QuickSettingsCardsConfig {
@@ -63,6 +66,7 @@ impl Default for QuickSettingsCardsConfig {
             mic: true,
             brightness: true,
             power: true,
+            vpn_close_on_connect: true,
         }
     }
 }
@@ -86,6 +90,7 @@ impl WidgetConfig for QuickSettingsConfig {
             "mic",
             "brightness",
             "power",
+            "vpn_close_on_connect",
         ];
         warn_unknown_options("quick_settings", entry, known_options);
 
@@ -108,6 +113,7 @@ impl WidgetConfig for QuickSettingsConfig {
                 mic: get_bool("mic"),
                 brightness: get_bool("brightness"),
                 power: get_bool("power"),
+                vpn_close_on_connect: get_bool("vpn_close_on_connect"),
             },
         }
     }
@@ -317,7 +323,7 @@ impl QuickSettingsWidget {
         if cards.vpn {
             let vpn_snapshot = VpnService::global().snapshot();
             let vpn_any_active = vpn_snapshot.any_active;
-            let vpn_icon_name_initial = vpn_icon_name(vpn_any_active);
+            let vpn_icon_name_initial = vpn_icon_name();
             let vpn_icon = base.add_icon(vpn_icon_name_initial, &[icon::ICON, icon::TEXT]);
 
             if vpn_any_active {
@@ -339,7 +345,7 @@ impl QuickSettingsWidget {
                 }
                 widget.remove_css_class(state::SERVICE_UNAVAILABLE);
 
-                let icon_name = vpn_icon_name(snapshot.any_active);
+                let icon_name = vpn_icon_name();
                 vpn_icon_handle.set_icon(icon_name);
 
                 if snapshot.any_active {
@@ -373,20 +379,26 @@ impl QuickSettingsWidget {
         // Gesture to toggle the Quick Settings window when clicked.
         let gesture = GestureClick::new();
         gesture.set_button(BUTTON_PRIMARY);
+        // Run in capture phase to handle click before BaseWidget's gesture
+        gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
 
         {
             let qs_window_handle = qs_window.clone();
             let root = base.widget().clone();
-            gesture.connect_pressed(move |gesture, n_press, _x, _y| {
+            // Use connect_released for immediate response without double-click delay
+            gesture.connect_released(move |gesture, _n_press, _x, _y| {
                 debug!(
                     "QuickSettingsWidget click: n_press={}, button={}",
-                    n_press,
+                    _n_press,
                     gesture.current_button()
                 );
 
-                if n_press != 1 || gesture.current_button() != BUTTON_PRIMARY {
+                if gesture.current_button() != BUTTON_PRIMARY {
                     return;
                 }
+
+                // Claim the gesture sequence to prevent BaseWidget's handler from firing
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
 
                 if let Some(native) = root.native() {
                     let surface = native.surface();

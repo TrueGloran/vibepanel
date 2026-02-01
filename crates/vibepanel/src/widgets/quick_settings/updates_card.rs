@@ -19,6 +19,7 @@ use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, ScanButton, clear_list_box, create_qs_list_box,
     set_icon_active, set_subtitle_active,
 };
+use super::window::current_quick_settings_window;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
 use crate::styles::{color, qs, row};
@@ -97,10 +98,15 @@ pub fn build_updates_card(state: &Rc<UpdatesCardState>) -> (GtkBox, Revealer, Op
             // Only act on activation, not deactivation
             if toggle.is_active() {
                 let snapshot = UpdatesService::global().snapshot();
-                if let Some(pm) = snapshot.package_manager
-                    && let Err(e) = spawn_upgrade_terminal(pm, None)
-                {
-                    tracing::error!("Failed to spawn upgrade terminal: {}", e);
+                if let Some(pm) = snapshot.package_manager {
+                    // Close the panel before spawning terminal
+                    if let Some(qs) = current_quick_settings_window() {
+                        qs.hide_panel();
+                    }
+
+                    if let Err(e) = spawn_upgrade_terminal(pm, None) {
+                        tracing::error!("Failed to spawn upgrade terminal: {}", e);
+                    }
                 }
                 // Reset toggle state (it's not a persistent toggle)
                 toggle.set_active(false);

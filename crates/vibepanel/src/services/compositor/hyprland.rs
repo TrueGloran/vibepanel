@@ -20,48 +20,32 @@ use serde_json::Value;
 use tracing::{debug, error, trace, warn};
 
 use super::{
-    CompositorBackend, WindowCallback, WindowInfo, WindowOpenedCallback, WorkspaceCallback,
-    WorkspaceMeta, WorkspaceSnapshot,
+    CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
+    WorkspaceSnapshot,
 };
 
 /// Default workspaces for Hyprland (dynamic workspaces, but we expose 1-10).
 const DEFAULT_WORKSPACE_COUNT: i32 = 10;
 
-/// Reconnect backoff constants (in milliseconds).
 const RECONNECT_INITIAL_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 30000;
 const RECONNECT_MULTIPLIER: f64 = 1.5;
 
-/// Hyprland backend implementation using native socket IPC.
 pub struct HyprlandBackend {
-    /// Output allow-list (empty = all outputs).
     allowed_outputs: RwLock<Vec<String>>,
-    /// Whether the backend is running (shared with event thread).
     running: Arc<AtomicBool>,
-    /// Handle to the event loop thread.
     event_thread: Mutex<Option<JoinHandle<()>>>,
-    /// Socket paths (resolved from environment).
     socket_path: RwLock<Option<String>>,
     event_socket_path: RwLock<Option<String>>,
-    /// Current workspace snapshot.
     workspace_snapshot: RwLock<WorkspaceSnapshot>,
-    /// Current focused window.
     focused_window: RwLock<Option<WindowInfo>>,
-    /// Static workspace metadata.
     workspaces: RwLock<Vec<WorkspaceMeta>>,
-    /// Callbacks.
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
-    /// Per-monitor active workspace tracking (monitor_name -> active_workspace_id).
     monitor_workspaces: RwLock<HashMap<String, i32>>,
-    /// Currently focused monitor name.
     focused_monitor: RwLock<Option<String>>,
-    /// Optional callback for window-opened events (shared with event thread).
-    /// Used by layer-shell surfaces to detect when external windows spawn.
-    window_opened_callback: Arc<Mutex<Option<WindowOpenedCallback>>>,
 }
 
 impl HyprlandBackend {
-    /// Create a new Hyprland backend.
     pub fn new(outputs: Option<Vec<String>>) -> Self {
         // Pre-generate workspace metadata (Hyprland uses dynamic workspaces,
         // but we expose 1-10 for consistent UI)
@@ -85,7 +69,6 @@ impl HyprlandBackend {
             callbacks: Mutex::new(None),
             monitor_workspaces: RwLock::new(HashMap::new()),
             focused_monitor: RwLock::new(None),
-            window_opened_callback: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -125,7 +108,6 @@ impl HyprlandBackend {
             }
         };
 
-        // Set timeout
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
 
@@ -440,10 +422,10 @@ impl HyprlandBackend {
     }
 
     /// Handle a Hyprland event line.
-    /// Returns (workspace_changed, window_changed, window_opened).
-    fn handle_event(&self, line: &str) -> (bool, bool, Option<WindowInfo>) {
+    /// Returns (workspace_changed, window_changed).
+    fn handle_event(&self, line: &str) -> (bool, bool) {
         let Some((event, data)) = line.split_once(">>") else {
-            return (false, false, None);
+            return (false, false);
         };
 
         trace!(
@@ -454,7 +436,6 @@ impl HyprlandBackend {
 
         let mut workspace_changed = false;
         let mut window_changed = false;
-        let mut window_opened: Option<WindowInfo> = None;
 
         match event {
             "workspace" => {
@@ -484,30 +465,7 @@ impl HyprlandBackend {
             }
             "openwindow" => {
                 // openwindow>>ADDRESS,WORKSPACE,CLASS,TITLE
-                // Parse the event data to extract window info
                 workspace_changed = self.refresh_occupied();
-
-                // Parse: ADDRESS,WORKSPACE,CLASS,TITLE
-                let parts: Vec<&str> = data.splitn(4, ',').collect();
-                if parts.len() >= 3 {
-                    let workspace_str = parts[1];
-                    let class = parts[2];
-                    let title = parts.get(3).unwrap_or(&"");
-
-                    let workspace_id = workspace_str.parse::<i32>().ok();
-
-                    window_opened = Some(WindowInfo {
-                        title: title.to_string(),
-                        app_id: class.to_string(),
-                        workspace_id,
-                        output: None, // Could query, but not critical for our use case
-                    });
-
-                    trace!(
-                        "Window opened: class={}, title={}, workspace={:?}",
-                        class, title, workspace_id
-                    );
-                }
             }
             "urgent" => {
                 // urgent>>WINDOW_ADDRESS
@@ -572,7 +530,7 @@ impl HyprlandBackend {
             _ => {}
         }
 
-        (workspace_changed, window_changed, window_opened)
+        (workspace_changed, window_changed)
     }
 
     /// Run the event loop (in background thread).
@@ -643,7 +601,7 @@ impl HyprlandBackend {
 
                 match line {
                     Ok(line) => {
-                        let (ws_changed, win_changed, win_opened) = backend.handle_event(&line);
+                        let (ws_changed, win_changed) = backend.handle_event(&line);
 
                         if let Some((ws_cb, win_cb)) = backend
                             .callbacks
@@ -657,16 +615,6 @@ impl HyprlandBackend {
                             if win_changed && let Some(ref win) = *backend.focused_window.read() {
                                 win_cb(win.clone());
                             }
-                        }
-
-                        // Invoke window-opened callback if a window was opened
-                        if let Some(ref win_info) = win_opened
-                            && let Some(ref cb) = *backend
-                                .window_opened_callback
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                        {
-                            cb(win_info.clone());
                         }
                     }
                     Err(e) => {
@@ -719,7 +667,6 @@ impl CompositorBackend for HyprlandBackend {
             .clone();
         let allowed_outputs = self.allowed_outputs.read().clone();
         let workspaces = self.workspaces.read().clone();
-        let window_opened_callback = Arc::clone(&self.window_opened_callback);
 
         // Share the running flag with the thread so stop() works correctly
         let running = Arc::clone(&self.running);
@@ -728,7 +675,6 @@ impl CompositorBackend for HyprlandBackend {
         // Note: This is a separate instance for the thread, but socket_path is now
         // also set on `self` so switch_workspace() works correctly.
         // The `running` flag is shared so stop() can signal the thread to exit.
-        // The `window_opened_callback` is also shared so it can be set after start().
         let backend = Arc::new(HyprlandBackend {
             allowed_outputs: RwLock::new(allowed_outputs),
             running,
@@ -741,7 +687,6 @@ impl CompositorBackend for HyprlandBackend {
             callbacks: Mutex::new(callbacks),
             monitor_workspaces: RwLock::new(HashMap::new()),
             focused_monitor: RwLock::new(None),
-            window_opened_callback,
         });
 
         // Start event loop thread
@@ -800,13 +745,6 @@ impl CompositorBackend for HyprlandBackend {
 
     fn name(&self) -> &'static str {
         "Hyprland"
-    }
-
-    fn set_window_opened_callback(&self, callback: Option<WindowOpenedCallback>) {
-        *self
-            .window_opened_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = callback;
     }
 }
 

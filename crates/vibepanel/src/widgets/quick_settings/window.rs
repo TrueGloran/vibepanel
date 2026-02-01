@@ -1,31 +1,36 @@
 //! Quick Settings window - global control center panel.
 //!
 //! Each bar creates its own QuickSettingsWindow instance via the
-//! QuickSettingsWindowHandle. The window is created on first open
-//! and destroyed when closed, ensuring fresh state each time.
+//! QuickSettingsWindowHandle. The window is created on each open and
+//! destroyed on close. Layer-shell surfaces don't reliably re-show
+//! after being hidden, so we always create fresh windows.
 
 use gtk4::gdk::{self, Monitor};
-use gtk4::glib::{self, ControlFlow, Propagation};
+use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, EventControllerKey, GestureClick, Label,
-    Orientation, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow,
+    Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
+    Revealer, RevealerTransitionType, ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
+use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
-use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
 use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
-use crate::styles::{class, qs, state, surface};
+use crate::styles::{qs, state, surface};
+use crate::widgets::layer_shell_popover::{
+    Dismissible, calculate_bar_exclusive_zone, calculate_popover_right_margin,
+    calculate_popover_top_margin, create_click_catcher, popover_keyboard_mode, setup_esc_handler,
+};
 
 use super::audio_card::{
     self, AudioCardState, build_audio_details, build_audio_hint_label, build_audio_row,
@@ -44,30 +49,59 @@ use super::wifi_card::{
     self, WifiCardState, build_network_subtitle, build_wifi_details, wifi_icon_name,
 };
 
+thread_local! {
+    static CURRENT_QS_WINDOW: RefCell<Option<Weak<QuickSettingsWindow>>> = const { RefCell::new(None) };
+}
+
+/// Get the currently active QuickSettingsWindow, if any.
+///
+/// Returns `Some(Rc<QuickSettingsWindow>)` if a QS window is currently open,
+/// `None` otherwise. Used by cards that need to interact with the window.
+pub(super) fn current_quick_settings_window() -> Option<Rc<QuickSettingsWindow>> {
+    CURRENT_QS_WINDOW.with(|cell| cell.borrow().as_ref().and_then(|weak| weak.upgrade()))
+}
+
+/// Set the current QuickSettingsWindow reference.
+fn set_current_qs_window(qs: &Rc<QuickSettingsWindow>) {
+    CURRENT_QS_WINDOW.with(|cell| {
+        *cell.borrow_mut() = Some(Rc::downgrade(qs));
+    });
+}
+
+/// Clear the current QuickSettingsWindow reference.
+fn clear_current_qs_window() {
+    CURRENT_QS_WINDOW.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+const QUICK_SETTINGS_CONTENT_WIDTH: i32 = 320;
+/// Estimated total width including margins (content + padding).
+const QUICK_SETTINGS_WIDTH_ESTIMATE: i32 = 336;
+const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
+const QUICK_SETTINGS_BOTTOM_MARGIN: i32 = 8;
+/// Container padding (surface padding + margins) for height calculation.
+const QUICK_SETTINGS_CONTAINER_PADDING: i32 = 24;
+const QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD: i32 = 100;
+const QUICK_SETTINGS_MIN_EDGE_MARGIN: i32 = 4;
+const QUICK_SETTINGS_MIN_VALID_WIDTH: i32 = 20;
+const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
+const CARD_ROW_SPACING: i32 = 8;
+const CARD_ROW_GAP: i32 = 8;
+const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
+
 /// Full Quick Settings window.
 ///
-/// A layer-shell surface with EXCLUSIVE keyboard mode, anchored below the bar
-/// widget that was clicked. Uses a fullscreen click-catcher window for
-/// click-outside-to-close behavior.
 pub struct QuickSettingsWindow {
     window: ApplicationWindow,
-    /// Fullscreen transparent click-catcher shown behind the panel.
     click_catcher: RefCell<Option<ApplicationWindow>>,
-    /// Anchor X position: widget center X in monitor coordinates.
+    /// Anchor X position in monitor coordinates.
     anchor_x: Cell<i32>,
-    /// Monitor the widget is on (if known).
     anchor_monitor: RefCell<Option<Monitor>>,
-
-    /// Configuration for which cards are enabled.
     cards_config: QuickSettingsCardsConfig,
-
-    /// Pending close timeout (for debounced focus-loss detection).
-    pending_close: Cell<Option<glib::SourceId>>,
-
-    /// Scrolled window container for height limiting.
     scroll_container: ScrolledWindow,
 
-    // Card states (organized by panel)
+    // Card states
     pub wifi: Rc<WifiCardState>,
     pub bluetooth: Rc<BluetoothCardState>,
     pub vpn: Rc<VpnCardState>,
@@ -91,9 +125,10 @@ impl QuickSettingsWindow {
         // This window is a floating control center panel.
         window.add_css_class(qs::WINDOW);
 
-        // Layer shell configuration for overlay panel behavior.
+        // Layer shell configuration for panel behavior.
+        // Use Top layer (not Overlay) to avoid appearing on top of fullscreen apps.
         window.init_layer_shell();
-        window.set_layer(Layer::Overlay);
+        window.set_layer(Layer::Top);
         window.set_exclusive_zone(0);
         window.set_anchor(Edge::Top, true);
         window.set_anchor(Edge::Right, true);
@@ -101,7 +136,7 @@ impl QuickSettingsWindow {
         window.set_anchor(Edge::Left, false);
         window.set_margin(Edge::Top, 0);
         window.set_margin(Edge::Right, 8);
-        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        window.set_keyboard_mode(popover_keyboard_mode());
 
         // Create scroll container for height limiting.
         // Max height will be set in update_position() based on monitor geometry.
@@ -118,7 +153,6 @@ impl QuickSettingsWindow {
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
             cards_config,
-            pending_close: Cell::new(None),
             scroll_container,
             wifi: Rc::new(WifiCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
@@ -147,97 +181,24 @@ impl QuickSettingsWindow {
                 .set_data("vibepanel-qs-window", Rc::downgrade(&qs));
         }
 
-        // ESC key closes the panel.
+        // ESC key closes the panel
         {
             let qs_weak = Rc::downgrade(&qs);
-            let key_controller = EventControllerKey::new();
-            key_controller.connect_key_pressed(move |_, keyval, _, _| {
-                if keyval == gdk::Key::Escape {
-                    if let Some(qs) = qs_weak.upgrade() {
-                        qs.hide_panel();
-                    }
-                    Propagation::Stop
-                } else {
-                    Propagation::Proceed
+            setup_esc_handler(&qs.window, move || {
+                if let Some(qs) = qs_weak.upgrade() {
+                    qs.hide_panel();
                 }
             });
-            qs.window.add_controller(key_controller);
-        }
-
-        // Set up auto-close behavior based on compositor.
-        //
-        // Different compositors have different focus behavior for layer-shell surfaces:
-        // - Niri/MangoWC: When external windows spawn, keyboard focus transfers away,
-        //   causing is-active to become false. The is-active approach works well.
-        // - Hyprland: Layer-shell surfaces retain keyboard focus even when other windows
-        //   spawn. Moving mouse over click-catcher also triggers is-active=false.
-        //   We use window-opened events instead.
-        let compositor_manager = CompositorManager::global();
-        let is_hyprland = compositor_manager.backend_name() == "Hyprland";
-
-        if is_hyprland {
-            // Hyprland: Subscribe to window-opened events and close when external window spawns
-            let qs_weak = Rc::downgrade(&qs);
-            compositor_manager.register_window_opened_callback(move |window_info| {
-                let Some(qs) = qs_weak.upgrade() else {
-                    return;
-                };
-
-                // Only close if QS is currently visible
-                if !qs.window.is_visible() {
-                    return;
-                }
-
-                // Don't close for vibepanel's own windows (class typically contains "vibepanel")
-                // This handles cases where we might spawn our own dialogs
-                let app_id_lower = window_info.app_id.to_lowercase();
-                if app_id_lower.contains("vibepanel") {
-                    return;
-                }
-
-                // External window opened - close QS panel
-                qs.hide_panel();
-            });
-        } else {
-            // Other compositors: Close panel when window loses focus (debounced to ignore
-            // momentary focus changes from internal clicks). When focus moves to an external
-            // window (e.g., VPN password dialog or terminal), is-active becomes false and
-            // stays false. Internal clicks cause a brief false→true bounce within ~1ms.
-            let qs_weak = Rc::downgrade(&qs);
-            qs.window
-                .connect_notify_local(Some("is-active"), move |window, _| {
-                    let Some(qs) = qs_weak.upgrade() else {
-                        return;
-                    };
-
-                    // Cancel any existing pending close
-                    if let Some(source_id) = qs.pending_close.take() {
-                        source_id.remove();
-                    }
-
-                    if !window.is_active() {
-                        // Focus lost - schedule close after short delay.
-                        // Will be cancelled if focus returns quickly (internal click).
-                        let qs_weak = Rc::downgrade(&qs);
-                        let source_id = glib::timeout_add_local_once(
-                            std::time::Duration::from_millis(50),
-                            move || {
-                                if let Some(qs) = qs_weak.upgrade() {
-                                    qs.pending_close.set(None);
-
-                                    if !qs.window.is_active() {
-                                        qs.hide_panel();
-                                    }
-                                }
-                            },
-                        );
-                        qs.pending_close.set(Some(source_id));
-                    }
-                });
         }
 
         // Subscribe to services
         Self::subscribe_to_services(&qs);
+
+        // Set VPN keyboard state's reference to this QS window for keyboard grab management
+        vpn_card::set_quick_settings_window(Rc::downgrade(&qs));
+
+        // Set the global current QS window reference for other cards
+        set_current_qs_window(&qs);
 
         qs
     }
@@ -266,9 +227,13 @@ impl QuickSettingsWindow {
 
         if cfg.vpn {
             let qs_weak = Rc::downgrade(qs);
+            let close_on_action = cfg.vpn_close_on_connect;
             VpnService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
-                    vpn_card::on_vpn_changed(&qs.vpn, snapshot);
+                    let action_completed = vpn_card::on_vpn_changed(&qs.vpn, snapshot);
+                    if action_completed && close_on_action {
+                        qs.hide_panel();
+                    }
                 }
             });
         }
@@ -325,9 +290,9 @@ impl QuickSettingsWindow {
         outer.add_css_class(qs::WINDOW_CONTAINER);
         outer.add_css_class(surface::NO_FOCUS);
         outer.set_margin_top(0);
-        outer.set_margin_bottom(4);
-        outer.set_margin_start(4);
-        outer.set_margin_end(4);
+        outer.set_margin_bottom(QUICK_SETTINGS_OUTER_MARGIN);
+        outer.set_margin_start(QUICK_SETTINGS_OUTER_MARGIN);
+        outer.set_margin_end(QUICK_SETTINGS_OUTER_MARGIN);
 
         // Apply surface styles - background now controlled via CSS variables
         outer.add_css_class("quick-settings-popover");
@@ -337,7 +302,7 @@ impl QuickSettingsWindow {
         let content = GtkBox::new(Orientation::Vertical, 0);
         content.add_css_class(qs::CONTROL_CENTER);
         content.add_css_class(surface::WIDGET_MENU_CONTENT);
-        content.set_size_request(320, -1);
+        content.set_size_request(QUICK_SETTINGS_CONTENT_WIDTH, -1);
 
         let cfg = &qs.cards_config;
 
@@ -455,11 +420,11 @@ impl QuickSettingsWindow {
         // Build rows dynamically with per-row accordion managers
         let mut is_first_row = true;
         for chunk in toggle_cards.chunks(2) {
-            let row = GtkBox::new(Orientation::Horizontal, 8);
+            let row = GtkBox::new(Orientation::Horizontal, CARD_ROW_GAP);
             row.add_css_class(qs::CARDS_ROW);
             row.set_homogeneous(true);
             if !is_first_row {
-                row.set_margin_top(8);
+                row.set_margin_top(CARD_ROW_SPACING);
             }
             is_first_row = false;
 
@@ -504,7 +469,7 @@ impl QuickSettingsWindow {
 
         if cfg.audio {
             let (audio_row, audio_revealer, audio_hint_label) = Self::build_audio_section(qs);
-            audio_row.set_margin_top(12);
+            audio_row.set_margin_top(AUDIO_SECTION_TOP_MARGIN);
             content.append(&audio_row);
             content.append(&audio_hint_label);
             content.append(&audio_revealer);
@@ -750,7 +715,7 @@ impl QuickSettingsWindow {
             "No connections".to_string()
         };
 
-        let vpn_icon = vpn_icon_name(vpn_any_active);
+        let vpn_icon = vpn_icon_name();
         let vpn_icon_active = vpn_any_active;
 
         let vpn_card = ToggleCard::builder()
@@ -777,6 +742,10 @@ impl QuickSettingsWindow {
                 let vpn = VpnService::global();
                 let snapshot = vpn.snapshot();
                 if let Some(primary) = snapshot.primary() {
+                    // Track connect attempt for close-on-success behavior
+                    if toggle.is_active() {
+                        vpn_card::add_pending_connect(&primary.uuid);
+                    }
                     vpn.set_connection_state(&primary.uuid, toggle.is_active());
                 }
             });
@@ -1108,7 +1077,7 @@ impl QuickSettingsWindow {
 
         let geom = monitor.geometry();
 
-        // Get bar dimensions from config
+        // Get bar dimensions from config for height calculation
         let config_mgr = ConfigManager::global();
         let bar_size = config_mgr.bar_size() as i32;
         let bar_padding = config_mgr.bar_padding() as i32;
@@ -1123,60 +1092,73 @@ impl QuickSettingsWindow {
             bar_size + 2 * screen_margin + popover_offset
         };
 
-        // Adjust for padding in exclusive zone when bar is visible
-        let top_margin = if bar_opacity > 0.0 {
-            popover_offset - bar_padding
-        } else {
-            popover_offset
-        };
+        // Set top margin using shared helper
+        let top_margin = calculate_popover_top_margin();
         self.window.set_margin(Edge::Top, top_margin);
 
         // Max height: screen minus bar zone, margins, and container padding
-        let bottom_margin = 8;
-        let container_padding = 24; // surface padding + margins
-        let max_height =
-            geom.height() - bar_exclusive_zone - top_margin - container_padding - bottom_margin;
+        let max_height = geom.height()
+            - bar_exclusive_zone
+            - top_margin
+            - QUICK_SETTINGS_CONTAINER_PADDING
+            - QUICK_SETTINGS_BOTTOM_MARGIN;
 
-        if max_height > 100 {
+        if max_height > QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD {
             self.scroll_container.set_max_content_height(max_height);
         }
 
+        // Set right margin using shared helper
         if anchor_x > 0 {
-            let monitor_width = geom.width();
-            // Use actual width if available, otherwise estimate based on content width (320px)
-            // plus margins/padding (~8px on each side)
             let window_width = {
                 let w = self.window.width();
-                if w > 20 { w } else { 336 }
+                if w > QUICK_SETTINGS_MIN_VALID_WIDTH {
+                    w
+                } else {
+                    QUICK_SETTINGS_WIDTH_ESTIMATE
+                }
             };
-            let right_margin = monitor_width - anchor_x - window_width / 2;
-            let max_margin = monitor_width.saturating_sub(window_width + 4);
-            // Ensure min <= max to avoid clamp panic
-            let clamped = if max_margin >= 4 {
-                right_margin.clamp(4, max_margin)
-            } else {
-                // Window is too wide for monitor, just use minimum margin
-                4.max(max_margin)
-            };
-            self.window.set_margin(Edge::Right, clamped);
+            let right_margin = calculate_popover_right_margin(
+                anchor_x,
+                geom.width(),
+                window_width,
+                QUICK_SETTINGS_MIN_EDGE_MARGIN,
+            );
+            self.window.set_margin(Edge::Right, right_margin);
         } else {
-            self.window.set_margin(Edge::Right, 8);
+            self.window
+                .set_margin(Edge::Right, QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN);
         }
     }
 
     /// Show the panel and associated click-catcher.
-    fn show_panel(&self) {
+    fn show_panel(self: &Rc<Self>) {
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             self.window.set_monitor(Some(monitor));
         }
 
-        // Create and show click-catcher
-        let catcher = self.create_click_catcher();
+        // Create click-catcher
+        let app = self
+            .window
+            .application()
+            .expect("QuickSettingsWindow must have an associated Application");
+
+        let bar_zone = calculate_bar_exclusive_zone();
+        let qs_weak = Rc::downgrade(self);
+        let catcher = create_click_catcher(&app, bar_zone, move || {
+            if let Some(qs) = qs_weak.upgrade() {
+                qs.hide_panel();
+            }
+        });
+
+        // Add QS-specific CSS class
+        catcher.add_css_class(qs::CLICK_CATCHER);
+
+        // Set monitor and show click-catcher
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             catcher.set_monitor(Some(monitor));
         }
         catcher.set_visible(true);
-        *self.click_catcher.borrow_mut() = Some(catcher);
+        *self.click_catcher.borrow_mut() = Some(catcher.clone());
 
         // Start with opacity 0 to avoid flicker while positioning
         self.window.set_opacity(0.0);
@@ -1205,119 +1187,67 @@ impl QuickSettingsWindow {
 
     /// Hide and destroy the panel and associated click-catcher.
     ///
-    /// This closes and destroys both windows, ensuring fresh state on next open.
-    fn hide_panel(&self) {
-        // Cancel any pending focus-loss close
-        if let Some(source_id) = self.pending_close.take() {
-            source_id.remove();
-        }
+    /// Note: This does NOT clear from PopoverTracker - the caller is responsible
+    /// for that (QuickSettingsWindowHandle or QuickSettingsDismissible).
+    pub(super) fn hide_panel(&self) {
+        // Restore keyboard mode if it was released for VPN password dialogs
+        vpn_card::restore_keyboard_if_released();
+
+        // Clear the global QS window reference
+        clear_current_qs_window();
 
         // Destroy click-catcher
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
         }
 
-        // Close the main window
+        // Destroy the main window
         self.window.close();
     }
 
-    /// Create the fullscreen click-catcher window.
-    fn create_click_catcher(&self) -> ApplicationWindow {
-        let app_opt = self.window.application();
-        let app = app_opt
-            .as_ref()
-            .expect("QuickSettingsWindow must have an associated Application");
+    /// Temporarily release exclusive keyboard grab to allow external dialogs
+    /// (like password prompts) to receive keyboard input.
+    ///
+    /// This switches the keyboard mode to OnDemand on the main window only.
+    /// The click-catcher always remains at KeyboardMode::None (it should never
+    /// take keyboard focus). Call `restore_keyboard_mode()` when the external
+    /// interaction is complete.
+    pub(super) fn release_keyboard_grab(&self) {
+        tracing::debug!("QuickSettings: Switching keyboard mode to OnDemand");
+        self.window.set_keyboard_mode(KeyboardMode::OnDemand);
+        // Note: Don't touch click-catcher - it must always be KeyboardMode::None
+    }
 
-        let catcher = ApplicationWindow::builder()
-            .application(app)
-            .title("vibepanel quick settings click catcher")
-            .decorated(false)
-            .build();
-
-        catcher.add_css_class(qs::CLICK_CATCHER);
-        catcher.add_css_class(class::CLICK_CATCHER);
-
-        catcher.init_layer_shell();
-        catcher.set_layer(Layer::Overlay);
-        catcher.set_exclusive_zone(-1);
-        catcher.set_anchor(Edge::Top, true);
-        catcher.set_anchor(Edge::Bottom, true);
-        catcher.set_anchor(Edge::Left, true);
-        catcher.set_anchor(Edge::Right, true);
-        catcher.set_keyboard_mode(KeyboardMode::OnDemand);
-
-        let overlay = GtkBox::new(Orientation::Vertical, 0);
-        overlay.set_hexpand(true);
-        overlay.set_vexpand(true);
-        catcher.set_child(Some(&overlay));
-
-        let gesture = GestureClick::new();
-        gesture.set_button(0);
-        {
-            let qs_weak = self.window.downgrade();
-            // Use connect_released instead of connect_pressed to allow GTK to complete
-            // the gesture lifecycle before hiding windows. Using connect_pressed causes
-            // "Broken accounting of active state" warnings on some systems because the
-            // gesture is interrupted mid-action when windows are hidden.
-            gesture.connect_released(move |_, _, _, _| {
-                if let Some(window) = qs_weak.upgrade() {
-                    // SAFETY: We stored Weak<QuickSettingsWindow> at window creation.
-                    // upgrade() safely returns None if dropped.
-                    unsafe {
-                        if let Some(weak_ptr) =
-                            window.data::<Weak<QuickSettingsWindow>>("vibepanel-qs-window")
-                            && let Some(qs) = weak_ptr.as_ref().upgrade()
-                        {
-                            qs.hide_panel();
-                        }
-                    }
-                }
-            });
-        }
-        catcher.add_controller(gesture);
-
-        // ESC key closes the panel (needed for Hyprland where keyboard focus
-        // may transfer to click-catcher when mouse moves over it)
-        {
-            let qs_weak = self.window.downgrade();
-            let key_controller = EventControllerKey::new();
-            key_controller.connect_key_pressed(move |_, keyval, _, _| {
-                if keyval == gdk::Key::Escape {
-                    if let Some(window) = qs_weak.upgrade() {
-                        // SAFETY: We stored Weak<QuickSettingsWindow> at window creation.
-                        // upgrade() safely returns None if dropped.
-                        unsafe {
-                            if let Some(weak_ptr) =
-                                window.data::<Weak<QuickSettingsWindow>>("vibepanel-qs-window")
-                                && let Some(qs) = weak_ptr.as_ref().upgrade()
-                            {
-                                qs.hide_panel();
-                            }
-                        }
-                    }
-                    Propagation::Stop
-                } else {
-                    Propagation::Proceed
-                }
-            });
-            catcher.add_controller(key_controller);
-        }
-
-        catcher
+    /// Restore the default keyboard mode after releasing it temporarily.
+    ///
+    /// This switches the main window back to the compositor-appropriate keyboard
+    /// mode (Exclusive for most compositors, OnDemand for Hyprland). The
+    /// click-catcher always remains at KeyboardMode::None.
+    pub(super) fn restore_keyboard_mode(&self) {
+        let mode = popover_keyboard_mode();
+        tracing::debug!("QuickSettings: Restoring keyboard mode to {:?}", mode);
+        self.window.set_keyboard_mode(mode);
+        // Note: Don't touch click-catcher - it must always be KeyboardMode::None
     }
 }
 
 /// Handle passed to bar widgets so they can toggle the Quick Settings window.
 ///
-/// The handle manages the window lifecycle: creating a fresh window on open
-/// and destroying it on close. This ensures the window always starts with
-/// fresh state (no remembered scroll positions, expanded sections, etc.).
+/// The handle manages the window lifecycle: the window is created on each open
+/// and destroyed on close. Layer-shell surfaces don't reliably re-show after
+/// being hidden with set_visible(false), so we always create fresh windows.
 #[derive(Clone)]
 pub struct QuickSettingsWindowHandle {
     app: Application,
     cards_config: QuickSettingsCardsConfig,
-    /// The current window instance (if open). Shared across clones.
+    /// The current window instance. Shared across clones via Rc.
     window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
+    /// ID returned from PopoverTracker when QS is active.
+    ///
+    /// Wrapped in `Rc<Cell<>>` because it's shared with `QuickSettingsDismissible`
+    /// (which needs to clear it when dismissed) and mutated from multiple places
+    /// (toggle_at close path and Dismissible::dismiss).
+    tracker_id: Rc<Cell<Option<PopoverId>>>,
 }
 
 impl QuickSettingsWindowHandle {
@@ -1326,33 +1256,73 @@ impl QuickSettingsWindowHandle {
             app,
             cards_config,
             window: Rc::new(RefCell::new(None)),
+            tracker_id: Rc::new(Cell::new(None)),
         }
     }
 
     pub fn toggle_at(&self, x: i32, monitor: Option<Monitor>) {
-        // Check if window exists and is visible, extracting it to avoid holding borrow
-        // across GTK operations that might trigger callbacks.
-        let existing_window = {
-            let borrowed = self.window.borrow();
-            if borrowed.as_ref().is_some_and(|w| w.window.is_visible()) {
-                borrowed.clone()
-            } else {
-                None
-            }
-        };
+        // Check if window exists and is visible
+        let is_visible = self
+            .window
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.window.is_visible());
 
-        // If window exists and is visible, close it
-        if let Some(window) = existing_window {
-            // Clear our reference first, before hide_panel() triggers GTK signals
-            *self.window.borrow_mut() = None;
-            window.hide_panel();
+        if is_visible {
+            // Window is visible - close and destroy it
+            if let Some(qs) = self.window.borrow_mut().take() {
+                qs.hide_panel();
+            }
+            // Clear from tracker using our stored ID
+            if let Some(id) = self.tracker_id.take() {
+                PopoverTracker::global().clear_if_active(id);
+            }
             return;
         }
 
-        // Window doesn't exist or was closed externally - create fresh one
+        // Dismiss any other active popup before opening QS
+        PopoverTracker::global().dismiss_active();
+
+        // Window not visible - create a new one
+        // (Layer-shell surfaces don't reliably re-show after being hidden,
+        // so we always create fresh)
         let qs = QuickSettingsWindow::new(&self.app, self.cards_config.clone());
         qs.set_anchor_position(x, monitor);
         qs.show_panel();
         *self.window.borrow_mut() = Some(qs);
+
+        // Register with popup tracker for seamless transitions and store the ID
+        let dismissible = QuickSettingsDismissible {
+            window: self.window.clone(),
+            tracker_id: self.tracker_id.clone(),
+        };
+        let id = PopoverTracker::global().set_active(Rc::new(dismissible));
+        self.tracker_id.set(Some(id));
+    }
+}
+
+/// Adapter to make QuickSettingsWindowHandle work with PopoverTracker.
+///
+/// This wraps the shared window reference and implements `Dismissible` so that
+/// other popups can dismiss Quick Settings when opening.
+struct QuickSettingsDismissible {
+    window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
+    tracker_id: Rc<Cell<Option<PopoverId>>>,
+}
+
+impl Dismissible for QuickSettingsDismissible {
+    fn dismiss(&self) {
+        if let Some(qs) = self.window.borrow_mut().take() {
+            qs.hide_panel();
+        }
+        // Clear our tracker ID since we've been dismissed
+        self.tracker_id.set(None);
+    }
+
+    fn is_visible(&self) -> bool {
+        self.window
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.window.is_visible())
     }
 }
