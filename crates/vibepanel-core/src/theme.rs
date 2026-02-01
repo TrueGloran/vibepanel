@@ -392,13 +392,21 @@ impl ThemePalette {
     --card-padding: var(--spacing-md);
     --row-padding-v: var(--spacing-sm);
     --row-padding-h: var(--spacing-md);
-    --slider-height: 6px;
 
     /* ===== Typography ===== */
     --font-family: {font_family};
     --font-scale: {font_scale};
     --font-size: calc(var(--widget-height) * var(--font-scale));
     --font-size-text-icon: {text_icon_size}px;
+
+    /* Slider height - scales with widget height */
+    --slider-height: calc(var(--widget-height) * 0.25);
+    --slider-height-thick: calc(var(--widget-height) * 0.4);
+    --slider-knob-size: calc(var(--widget-height) * 0.65);
+    /* Slider radii - half of height, scaled by radius factor */
+    --slider-radius: calc(var(--widget-height) * 0.125 * {radius_factor});
+    --slider-radius-thick: calc(var(--widget-height) * 0.2 * {radius_factor});
+    --slider-knob-radius: calc(var(--widget-height) * 0.325 * {radius_factor});
 
     /* Font size scale for visual hierarchy */
     --font-size-lg: 1.1em;    /* Headings, section titles */

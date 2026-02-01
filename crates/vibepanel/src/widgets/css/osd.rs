@@ -19,16 +19,16 @@ pub fn css() -> &'static str {
 /* Slider styling - slightly thicker for better visual weight */
 .osd-slider trough {
     background-color: var(--color-slider-track);
-    border-radius: calc(5px * var(--radius-factor));
-    min-height: 10px;
-    min-width: 10px;
+    border-radius: var(--slider-radius-thick);
+    min-height: var(--slider-height-thick);
+    min-width: var(--slider-height-thick);
 }
 
 .osd-slider trough highlight {
     background-color: var(--color-accent-slider, var(--color-accent-primary));
-    border-radius: calc(5px * var(--radius-factor));
-    min-height: 10px;
-    min-width: 10px;
+    border-radius: var(--slider-radius-thick);
+    min-height: var(--slider-height-thick);
+    min-width: var(--slider-height-thick);
 }
 
 /* Hide the slider knob/thumb */

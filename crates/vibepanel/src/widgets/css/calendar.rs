@@ -45,8 +45,8 @@ calendar.view grid *:selected:not(.today) {
 
 calendar.view grid label.day-number {
     margin: 1px 2px;
-    min-width: 24px;
-    min-height: 24px;
+    min-width: calc(var(--font-size) * 1.5);
+    min-height: calc(var(--font-size) * 1.5);
 }
 
 .week-number-header {

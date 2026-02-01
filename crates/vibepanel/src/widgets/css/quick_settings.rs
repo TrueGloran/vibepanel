@@ -100,7 +100,7 @@ window.quick-settings-window {
 /* Wi-Fi switch styling - accent colored track when on */
 .qs-wifi-switch-row switch {
     /* Switch track: rounder than slider to contain it */
-    border-radius: calc(10px * var(--radius-factor));
+    border-radius: calc(var(--slider-radius-thick) * 2.5);
     margin-top: 2px;
 }
 
@@ -114,9 +114,9 @@ window.quick-settings-window {
 }
 
 .qs-wifi-switch-row switch slider {
-    border-radius: calc(6px * var(--radius-factor));
-    min-width: 12px;
-    min-height: 12px;
+    border-radius: calc(var(--slider-radius-thick) * 1.5);
+    min-width: calc(var(--slider-height-thick) * 1.2);
+    min-height: calc(var(--slider-height-thick) * 1.2);
 }
 
 /* Bluetooth controls row in expanded details */
@@ -177,8 +177,8 @@ window.quick-settings-window {
 
 /* Expander chevron button */
 .qs-toggle-more {
-    min-width: 32px;
-    min-height: 32px;
+    min-width: calc(var(--icon-size) * 2);
+    min-height: calc(var(--icon-size) * 2);
     padding: 0;
     border-radius: var(--radius-widget);
 }
@@ -213,8 +213,8 @@ window.quick-settings-window {
 
 /* Row hamburger menu button */
 .qs-row-menu-button {
-    min-width: 32px;
-    min-height: 32px;
+    min-width: calc(var(--icon-size) * 2);
+    min-height: calc(var(--icon-size) * 2);
     padding: 0;
     border-radius: var(--radius-widget);
 }
@@ -237,6 +237,8 @@ window.quick-settings-window {
 /* Row action labels - color via vp-accent */
 .qs-row-action-label {
     font-size: var(--font-size-sm);
+    min-width: var(--font-size-sm);
+    min-height: var(--font-size-sm);
 }
 
 .qs-row-action-label:hover {
@@ -259,19 +261,19 @@ window.quick-settings-window {
  * Replaces the radio-symbolic icon so the shape scales with --radius-factor
  * (square at border_radius: 0, circular at border_radius: 50). */
 .qs-radio-indicator {
-    min-width: 12px;
-    min-height: 12px;
+    min-width: calc(var(--slider-height-thick) * 1.2);
+    min-height: calc(var(--slider-height-thick) * 1.2);
     border: 1.5px solid var(--color-foreground-muted);
     /* Nearly-pill but subtly softer for visual distinction */
-    border-radius: calc(5.4px * var(--radius-factor));
+    border-radius: calc(var(--slider-radius-thick) * 1.1);
     margin: 2px 0;
 }
 
 /* Checkmark indicator background for selected audio/mic device rows */
 .qs-row-indicator-bg {
-    border-radius: calc(8px * var(--radius-factor));
-    min-width: 16px;
-    min-height: 16px;
+    border-radius: var(--slider-knob-radius);
+    min-width: var(--slider-knob-size);
+    min-height: var(--slider-knob-size);
 }
 
 /* Checkmark icon for selected state - floats above background */

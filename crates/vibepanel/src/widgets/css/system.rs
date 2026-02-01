@@ -34,14 +34,14 @@ pub fn css() -> &'static str {
 .system-progress-bar trough,
 .system-core-bar trough {
     background-color: var(--color-slider-track);
-    border-radius: calc(3px * var(--radius-factor));
+    border-radius: var(--slider-radius);
     min-height: var(--slider-height);
 }
 
 .system-progress-bar trough progress,
 .system-core-bar trough progress {
     background-color: var(--color-accent-slider, var(--color-accent-primary));
-    border-radius: calc(3px * var(--radius-factor));
+    border-radius: var(--slider-radius);
     min-height: var(--slider-height);
 }
 

@@ -183,7 +183,7 @@ popover.widget-menu.background > contents {{
 
 .slider-row scale trough {{
     min-height: var(--slider-height);
-    border-radius: calc(3px * var(--radius-factor));
+    border-radius: var(--slider-radius);
     background-color: var(--color-slider-track);
 }}
 
@@ -192,16 +192,16 @@ popover.widget-menu.background > contents {{
     background-color: var(--color-accent-slider, var(--color-accent-primary));
     border: none;
     min-height: var(--slider-height);
-    border-radius: calc(3px * var(--radius-factor));
+    border-radius: var(--slider-radius);
 }}
 
 .slider-row scale slider {{
-    min-width: 16px;
-    min-height: 16px;
+    min-width: var(--slider-knob-size);
+    min-height: var(--slider-knob-size);
     margin: -5px;
     padding: 0;
     background-color: var(--color-accent-primary);
-    border-radius: calc(8px * var(--radius-factor));
+    border-radius: var(--slider-knob-radius);
     border: none;
     box-shadow: none;
     transition: transform 100ms ease-out;
@@ -227,8 +227,8 @@ popover.widget-menu.background > contents {{
 
 /* Slider row expander (B) */
 .slider-row .qs-toggle-more {{
-    min-width: 32px;
-    min-height: 32px;
+    min-width: calc(var(--icon-size) * 2);
+    min-height: calc(var(--icon-size) * 2);
     padding: 0;
     border-radius: var(--radius-widget);
 }}
