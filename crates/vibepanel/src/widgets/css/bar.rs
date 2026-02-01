@@ -55,8 +55,8 @@ sectioned-bar.bar {{
     padding: 0;
 }}
 
-/* Widget hover state - standalone widgets */
-.widget:not(.widget-group):hover {{
+/* Widget hover state - standalone clickable widgets */
+.widget.clickable:not(.widget-group):hover {{
     background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
 }}
 
@@ -70,8 +70,8 @@ sectioned-bar.bar {{
     margin-left: -20px;
 }}
 
-/* Widget items inside groups - individual hover targets */
-.widget-group > .content > .widget-item:hover {{
+/* Widget items inside groups - individual clickable hover targets */
+.widget-group > .content > .widget-item.clickable:hover {{
     background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
     border-radius: var(--radius-widget);
 }}
@@ -101,6 +101,11 @@ sectioned-bar.bar {{
     min-height: 0.2em;
     border-radius: var(--radius-pill);
     color: var(--color-foreground-faint);
+}}
+
+/* Workspace indicator hover state - clickable indicators */
+.workspace-indicator.clickable:hover {{
+    background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
 }}
 
 .workspace-indicator-minimal {{

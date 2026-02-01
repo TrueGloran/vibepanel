@@ -12,7 +12,7 @@ use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::tooltip::TooltipManager;
-use crate::styles::{class, surface};
+use crate::styles::{class, state, surface};
 use crate::widgets::layer_shell_popover::{Dismissible, LayerShellPopover};
 use tracing::debug;
 
@@ -405,10 +405,15 @@ impl BaseWidget {
     ///
     /// Note: The actual LayerShellPopover is created lazily on first use,
     /// since at widget construction time the widget isn't yet attached to a window.
+    ///
+    /// Also adds the `clickable` CSS class to enable hover styling for interactive widgets.
     pub fn create_menu<F>(&self, builder: F) -> Rc<MenuHandle>
     where
         F: Fn() -> gtk4::Widget + 'static,
     {
+        // Mark as clickable so CSS hover styling applies
+        self.container.add_css_class(state::CLICKABLE);
+
         let handle = MenuHandle::new(self.widget_name.clone(), builder, self.container.clone());
         *self.menu.borrow_mut() = Some(handle.clone());
         handle

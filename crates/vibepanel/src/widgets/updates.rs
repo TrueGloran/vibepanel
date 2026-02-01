@@ -17,7 +17,7 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::icons::IconHandle;
 use crate::services::tooltip::TooltipManager;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
-use crate::styles::{class, widget};
+use crate::styles::{class, state, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::updates_common::{format_tooltip, icon_for_state, spawn_upgrade_terminal};
 use crate::widgets::{WidgetConfig, warn_unknown_options};
@@ -83,6 +83,9 @@ impl UpdatesWidget {
     pub fn new(config: UpdatesConfig) -> Self {
         let base = BaseWidget::new(&[widget::UPDATES]);
         base.set_tooltip("Updates: checking...");
+
+        // Mark as clickable since we have a custom click handler
+        base.widget().add_css_class(state::CLICKABLE);
 
         let icon_handle = base.add_icon("software-update-available", &[widget::UPDATES_ICON]);
         let count_label = base.add_label(None, &[widget::UPDATES_COUNT, class::VCENTER_CAPS]);
