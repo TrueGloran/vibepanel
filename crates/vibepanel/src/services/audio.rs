@@ -18,8 +18,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use parking_lot::Mutex;
 use std::thread;
@@ -528,7 +528,6 @@ impl Drop for AudioService {
 #[derive(Default)]
 struct PulseWorkerState {
     // ===== Sink (Output Device) State =====
-
     /// Current volume of the default sink as a percentage (0–150).
     ///
     /// Values above 100 represent overdrive/amplification. Updated whenever
@@ -579,7 +578,6 @@ struct PulseWorkerState {
     control_available: bool,
 
     // ===== Source (Input Device / Microphone) State =====
-
     /// Whether the default audio input source (microphone) is muted.
     ///
     /// `None` if we haven't yet received source info from PulseAudio.
@@ -620,7 +618,6 @@ struct PulseWorkerState {
     mic_control_available: bool,
 
     // ===== Connection State =====
-
     /// Whether we have an active connection to the PulseAudio server.
     ///
     /// Set to `true` once we receive initial server info, `false` if the
@@ -631,7 +628,6 @@ struct PulseWorkerState {
     // These fields detect when PulseAudio/PipeWire silently ignores volume
     // changes, which happens on some systems (e.g., Asahi Linux with DSP
     // filter chains) until audio is actively playing.
-
     /// The last volume percentage we attempted to set.
     ///
     /// `None` if no volume change has been requested since startup or since
@@ -647,7 +643,6 @@ struct PulseWorkerState {
     /// indicating the backend is unresponsive to volume commands.
     stuck_attempts: u8,
 }
-
 
 /// Main function for the PulseAudio worker thread.
 fn pulse_worker_thread(command_rx: Receiver<AudioCommand>) {
@@ -904,10 +899,7 @@ fn handle_command(
             );
         }
         AudioCommand::ToggleMicMute => {
-            let current_muted = state
-                .lock()
-                .mic_muted
-                .unwrap_or(false);
+            let current_muted = state.lock().mic_muted.unwrap_or(false);
             set_source_mute(
                 Arc::clone(&mainloop),
                 Arc::clone(&context),
@@ -1106,10 +1098,7 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| name.clone());
 
-                let default_name = state_for_cb
-                    .lock()
-                    .default_sink_name
-                    .clone();
+                let default_name = state_for_cb.lock().default_sink_name.clone();
                 let is_default = default_name.as_ref().map(|n| n == &name).unwrap_or(false);
 
                 // Check active port availability (for jack detection, e.g., headphones)
@@ -1121,20 +1110,16 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
                     PortAvailable::Yes | PortAvailable::Unknown => true,
                 });
 
-                collected_for_cb
-                    .lock()
-                    .push(SinkInfoSnapshot {
-                        name,
-                        description,
-                        is_default,
-                        port_available,
-                    });
+                collected_for_cb.lock().push(SinkInfoSnapshot {
+                    name,
+                    description,
+                    is_default,
+                    port_available,
+                });
             }
             ListResult::End => {
                 // All sinks collected; update state.
-                let sinks = std::mem::take(
-                    &mut *collected_for_cb.lock(),
-                );
+                let sinks = std::mem::take(&mut *collected_for_cb.lock());
                 {
                     let mut st = state_for_cb.lock();
                     st.sinks = sinks;
@@ -1173,9 +1158,7 @@ fn fetch_default_sink(
     context: Arc<Mutex<Context>>,
     state: Arc<Mutex<PulseWorkerState>>,
 ) {
-    let sink_index = state
-        .lock()
-        .default_sink_index;
+    let sink_index = state.lock().default_sink_index;
 
     let Some(index) = sink_index else {
         debug!("AudioService: no default sink to query");
@@ -1310,10 +1293,7 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| name.clone());
 
-                let default_name = state_for_cb
-                    .lock()
-                    .default_source_name
-                    .clone();
+                let default_name = state_for_cb.lock().default_source_name.clone();
                 let is_default = default_name.as_ref().map(|n| n == &name).unwrap_or(false);
 
                 // Check active port availability (for jack detection)
@@ -1322,20 +1302,16 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
                     PortAvailable::Yes | PortAvailable::Unknown => true,
                 });
 
-                collected_for_cb
-                    .lock()
-                    .push(SourceInfoSnapshot {
-                        name,
-                        description,
-                        is_default,
-                        port_available,
-                    });
+                collected_for_cb.lock().push(SourceInfoSnapshot {
+                    name,
+                    description,
+                    is_default,
+                    port_available,
+                });
             }
             ListResult::End => {
                 // All sources collected; update state.
-                let sources = std::mem::take(
-                    &mut *collected_for_cb.lock(),
-                );
+                let sources = std::mem::take(&mut *collected_for_cb.lock());
                 {
                     let mut st = state_for_cb.lock();
                     st.sources = sources;
@@ -1598,10 +1574,7 @@ fn set_sink_mute(
     state: Arc<Mutex<PulseWorkerState>>,
     muted: bool,
 ) {
-    let sink_index = match state
-        .lock()
-        .default_sink_index
-    {
+    let sink_index = match state.lock().default_sink_index {
         Some(idx) => idx,
         None => {
             warn!("AudioService: no default sink to set mute on");
@@ -1638,10 +1611,7 @@ fn set_source_mute(
     state: Arc<Mutex<PulseWorkerState>>,
     muted: bool,
 ) {
-    let source_index = match state
-        .lock()
-        .default_source_index
-    {
+    let source_index = match state.lock().default_source_index {
         Some(idx) => idx,
         None => {
             warn!("AudioService: no default source to set mute on");
