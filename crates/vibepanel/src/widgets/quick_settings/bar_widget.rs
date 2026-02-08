@@ -18,9 +18,9 @@ use super::wifi_card::wifi_icon_name;
 use crate::services::audio::{AudioService, AudioSnapshot};
 use crate::services::bluetooth::{BluetoothService, BluetoothSnapshot};
 use crate::services::config_manager::ConfigManager;
-use crate::services::network::{NetworkService, NetworkSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::services::vpn::{VpnService, VpnSnapshot};
+use crate::services::wifi::{WifiService, WifiSnapshot};
 use crate::styles::{icon, qs, state, widget};
 use crate::widgets::BaseWidget;
 use crate::widgets::WidgetConfig;
@@ -245,13 +245,13 @@ impl QuickSettingsWidget {
 
         // Wi-Fi icon
         if cards.wifi {
-            let wifi_snapshot = NetworkService::global().snapshot();
-            let wifi_enabled = wifi_snapshot.wifi_enabled.unwrap_or(false);
-            let wifi_connected = wifi_snapshot.connected;
-            let wired_connected = wifi_snapshot.wired_connected;
-            let has_wifi_device = wifi_snapshot.has_wifi_device;
+            let wifi_snapshot = WifiService::global().snapshot();
+            let wifi_enabled = wifi_snapshot.wifi_enabled().unwrap_or(false);
+            let wifi_connected = wifi_snapshot.connected();
+            let wired_connected = wifi_snapshot.wired_connected();
+            let has_wifi_device = wifi_snapshot.has_wifi_device();
             let wifi_icon_name_initial = wifi_icon_name(
-                wifi_snapshot.available,
+                wifi_snapshot.available(),
                 wifi_connected,
                 wifi_enabled,
                 wired_connected,
@@ -266,12 +266,12 @@ impl QuickSettingsWidget {
                 wifi_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
 
-            // Subscribe to NetworkService updates
+            // Subscribe to WifiService updates
             let wifi_icon_handle = wifi_icon.clone();
-            NetworkService::global().connect(move |snapshot: &NetworkSnapshot| {
+            WifiService::global().connect(move |snapshot: &WifiSnapshot| {
                 let widget = wifi_icon_handle.widget();
 
-                if !snapshot.available {
+                if !snapshot.available() {
                     widget.add_css_class(state::SERVICE_UNAVAILABLE);
                     widget.remove_css_class(qs::WIFI_DISABLED_ICON);
                     widget.remove_css_class(state::ICON_ACTIVE);
@@ -282,13 +282,13 @@ impl QuickSettingsWidget {
                 }
                 widget.remove_css_class(state::SERVICE_UNAVAILABLE);
 
-                let enabled = snapshot.wifi_enabled.unwrap_or(false);
-                let connected = snapshot.connected;
-                let wired_connected = snapshot.wired_connected;
-                let has_wifi_device = snapshot.has_wifi_device;
+                let enabled = snapshot.wifi_enabled().unwrap_or(false);
+                let connected = snapshot.connected();
+                let wired_connected = snapshot.wired_connected();
+                let has_wifi_device = snapshot.has_wifi_device();
 
                 let icon_name = wifi_icon_name(
-                    snapshot.available,
+                    snapshot.available(),
                     connected,
                     enabled,
                     wired_connected,
@@ -308,16 +308,19 @@ impl QuickSettingsWidget {
                     widget.remove_css_class(state::ICON_ACTIVE);
                 }
 
-                let tooltip = if wired_connected {
+                // Tooltip
+                let tooltip = if snapshot.wired_connected() {
                     "Ethernet connected".to_string()
-                } else if connected {
-                    let ssid = snapshot.ssid.as_deref().unwrap_or("Connected");
-                    let strength = snapshot.strength;
+                } else if snapshot.connected() {
+                    let ssid = snapshot.active_ssid().unwrap_or("Connected");
+                    let strength = snapshot.active_strength();
                     if strength > 0 {
                         format!("{}\nSignal: {}%", ssid, strength)
                     } else {
                         ssid.to_string()
                     }
+                } else if snapshot.wifi_enabled() == Some(false) {
+                    "Wi-Fi Off".to_string()
                 } else {
                     "Disconnected".to_string()
                 };
@@ -332,7 +335,9 @@ impl QuickSettingsWidget {
             let vpn_icon_name_initial = vpn_icon_name();
             let vpn_icon = base.add_icon(vpn_icon_name_initial, &[icon::ICON, icon::TEXT]);
 
-            if vpn_any_active {
+            if !vpn_snapshot.available {
+                vpn_icon.widget().set_visible(false);
+            } else if vpn_any_active {
                 vpn_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
 
@@ -342,14 +347,10 @@ impl QuickSettingsWidget {
                 let widget = vpn_icon_handle.widget();
 
                 if !snapshot.available {
-                    widget.add_css_class(state::SERVICE_UNAVAILABLE);
-                    widget.remove_css_class(state::ICON_ACTIVE);
-                    vpn_icon_handle.set_icon("network-vpn-disabled-symbolic");
-                    TooltipManager::global()
-                        .set_styled_tooltip(&widget, "VPN: Service unavailable");
+                    widget.set_visible(false);
                     return;
                 }
-                widget.remove_css_class(state::SERVICE_UNAVAILABLE);
+                widget.set_visible(true);
 
                 let icon_name = vpn_icon_name();
                 vpn_icon_handle.set_icon(icon_name);
@@ -402,6 +403,10 @@ impl QuickSettingsWidget {
                 if gesture.current_button() != BUTTON_PRIMARY {
                     return;
                 }
+
+                // Cancel any pending or visible tooltips to prevent them from
+                // appearing after the click
+                TooltipManager::global().cancel_and_hide();
 
                 // Claim the gesture sequence to prevent BaseWidget's handler from firing
                 gesture.set_state(gtk4::EventSequenceState::Claimed);

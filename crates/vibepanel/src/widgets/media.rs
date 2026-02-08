@@ -397,7 +397,7 @@ impl CallbackWidgetRefs {
     }
 }
 
-fn create_controls(parent_widget: &gtk4::Box) -> ControlsHandle {
+fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
     use crate::services::icons::IconsService;
     use crate::services::tooltip::TooltipManager;
     use crate::styles::{button, icon};
@@ -410,16 +410,12 @@ fn create_controls(parent_widget: &gtk4::Box) -> ControlsHandle {
     container.add_css_class(media::CONTROLS);
     container.set_visible(false);
 
-    // Add motion controller to manage tooltip behavior when hovering over controls.
-    // - On enter: hide parent tooltip so button tooltips can show
-    // - On leave: re-trigger parent tooltip
+    // Add motion controller to hide parent tooltip when hovering over controls.
+    // This allows individual button tooltips to show without conflicting with
+    // the parent widget's tooltip.
     let motion = gtk4::EventControllerMotion::new();
     motion.connect_enter(|_, _, _| {
         TooltipManager::global().cancel_and_hide();
-    });
-    let parent_for_leave = parent_widget.clone();
-    motion.connect_leave(move |_| {
-        TooltipManager::global().trigger_tooltip(&parent_for_leave);
     });
     container.add_controller(motion);
 

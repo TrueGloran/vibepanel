@@ -1,16 +1,6 @@
-//! NetworkService - Wi-Fi state via NetworkManager over D-Bus.
+//! NetworkService — Wi-Fi state via NetworkManager over D-Bus.
 //!
-//! - Asynchronously connects to NetworkManager via D-Bus
-//! - Discovers Wi-Fi device and monitors state changes
-//! - Provides network list with signal strength, security, and known status
-//! - Supports scan, connect, disconnect, and forget operations
-//!
-//! ## Architecture
-//!
-//! - Uses Gio's async D-Bus proxy for non-blocking operations
-//! - Background threads send updates to the main thread via `glib::idle_add_once()`
-//!   which wakes the main loop immediately (no polling required)
-//! - Notifies listeners on the GLib main loop with canonical snapshots
+//! Uses Gio's async D-Bus proxy; background threads deliver updates via `glib::idle_add_once()`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -24,16 +14,17 @@ use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant, VariantTy};
 use tracing::{debug, error, warn};
 
-use super::callbacks::Callbacks;
+use crate::services::callbacks::{CallbackId, Callbacks};
+use crate::services::wifi::{SecurityType, WifiNetwork, objpath_to_string};
 
 // D-Bus Constants
 
 /// NetworkManager service name.
-const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
+pub const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
 /// NetworkManager main object path.
-const NM_PATH: &str = "/org/freedesktop/NetworkManager";
+pub const NM_PATH: &str = "/org/freedesktop/NetworkManager";
 /// NetworkManager main interface.
-const NM_IFACE: &str = "org.freedesktop.NetworkManager";
+pub const NM_IFACE: &str = "org.freedesktop.NetworkManager";
 /// Device interface for type detection.
 const IFACE_DEV: &str = "org.freedesktop.NetworkManager.Device";
 /// Wireless device interface.
@@ -49,21 +40,6 @@ const IFACE_ACTIVE_CONN: &str = "org.freedesktop.NetworkManager.Connection.Activ
 const ETHERNET_DEVICE_TYPE: u32 = 1;
 /// NetworkManager device type for Wi-Fi (NM_DEVICE_TYPE_WIFI = 2).
 const WIFI_DEVICE_TYPE: u32 = 2;
-
-/// A Wi-Fi network visible in the scan results.
-#[derive(Debug, Clone)]
-pub struct WifiNetwork {
-    /// Network SSID (name).
-    pub ssid: String,
-    /// Signal strength percentage (0-100).
-    pub strength: i32,
-    /// Security type ("open" or "secured").
-    pub security: String,
-    /// Whether this is the currently connected network.
-    pub active: bool,
-    /// Whether NetworkManager has a saved connection profile for this SSID.
-    pub known: bool,
-}
 
 /// Canonical snapshot of Wi-Fi state.
 #[derive(Debug, Clone)]
@@ -107,7 +83,6 @@ pub struct NetworkSnapshot {
 }
 
 impl NetworkSnapshot {
-    /// Create an initial "unknown" snapshot.
     fn unknown() -> Self {
         Self {
             available: false,
@@ -215,8 +190,7 @@ impl NetworkService {
             failed_ssid: RefCell::new(None),
         });
 
-        // Initialize D-Bus connection.
-        // Background threads send updates via glib::idle_add_once() - no polling needed.
+        // Initialize D-Bus — NM property signals deliver updates without polling.
         Self::init_dbus(&service);
 
         service
@@ -232,18 +206,22 @@ impl NetworkService {
     }
 
     /// Register a callback to be invoked whenever the network state changes.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&NetworkSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
-        // Immediately send current snapshot.
+        // Immediately send current snapshot to the new callback only.
         let snapshot = self.snapshot.borrow().clone();
-        self.callbacks.notify(&snapshot);
+        self.callbacks.notify_single(id, &snapshot);
+        id
     }
 
-    /// Return the current network snapshot.
+    pub fn unsubscribe(&self, id: CallbackId) {
+        self.callbacks.unregister(id);
+    }
+
     pub fn snapshot(&self) -> NetworkSnapshot {
         self.snapshot.borrow().clone()
     }
@@ -302,10 +280,8 @@ impl NetworkService {
                     self.last_scan_value.set(Some(ls));
                 }
 
-                // Clear scan_in_progress if we got fresh results.
+                // Clear scan flag if we got newer results (or first results).
                 if self.scan_in_progress.get() {
-                    // Fresh results if: we have a timestamp and either didn't before,
-                    // or it's newer than what we had
                     let got_fresh_results = match (last_scan, prev_last_scan) {
                         (Some(new), Some(old)) => new > old,
                         (Some(_), None) => true,
@@ -316,10 +292,8 @@ impl NetworkService {
                     }
                 }
 
-                // Note: We do NOT clear connecting_ssid here based on net.active.
-                // NetworkManager may briefly show the network as active during the
-                // authentication phase, before authentication actually completes.
-                // We only clear connecting_ssid when ConnectionAttemptFinished arrives.
+                // Don't clear connecting_ssid here — NM may briefly show active during auth.
+                // Wait for ConnectionAttemptFinished.
 
                 let mut snapshot = self.snapshot.borrow_mut();
                 snapshot.networks = networks;
@@ -344,8 +318,7 @@ impl NetworkService {
                     *self.failed_ssid.borrow_mut() = None;
                 } else {
                     *self.failed_ssid.borrow_mut() = Some(ssid);
-                    // Invalidate the known SSIDs cache so we don't show "Saved"
-                    // for a network that failed to connect.
+                    // Invalidate known SSIDs cache so failed network doesn't show "Saved".
                     *self
                         .known_ssids_last_refresh
                         .lock()
@@ -449,7 +422,7 @@ impl NetworkService {
                             if signal_name == "DeviceAdded"
                                 && let Some(params) =
                                     values.get(3).and_then(|v| v.get::<Variant>().ok())
-                                && let Some(device_path) = params.child_value(0).get::<String>()
+                                && let Some(device_path) = objpath_to_string(&params.child_value(0))
                             {
                                 // Check if the new device is an ethernet adapter
                                 Self::check_device_type_for_ethernet(&device_path);
@@ -462,10 +435,14 @@ impl NetworkService {
                         proxy.connect_local("notify::g-name-owner", false, move |values| {
                             let this = this_weak.upgrade()?;
                             let proxy = values[0].get::<gio::DBusProxy>().ok();
-                            let has_owner = proxy.and_then(|p| p.name_owner()).is_some();
+                            let has_owner = proxy.as_ref().and_then(|p| p.name_owner()).is_some();
                             if has_owner {
-                                // Service reappeared - rediscover Wi-Fi device.
+                                // Service reappeared - restore proxy and rediscover Wi-Fi device.
+                                if let Some(p) = proxy {
+                                    this.nm_proxy.replace(Some(p));
+                                }
                                 this.set_available(true);
+                                this.update_nm_flags();
                                 Self::discover_wifi_device();
                             } else {
                                 // Service disappeared - mark unavailable.
@@ -590,7 +567,7 @@ impl NetworkService {
         let paths: Vec<String> = result
             .child_value(0)
             .iter()
-            .filter_map(|v| v.get::<String>())
+            .filter_map(|v| objpath_to_string(&v))
             .collect();
 
         Ok(paths)
@@ -910,7 +887,7 @@ impl NetworkService {
         // Get active access point path
         let ap_path = wifi
             .cached_property("ActiveAccessPoint")
-            .and_then(|v| v.get::<String>());
+            .and_then(|v| objpath_to_string(&v));
 
         let ap_path = match ap_path {
             Some(p) if !p.is_empty() && p != "/" => p,
@@ -987,7 +964,7 @@ impl NetworkService {
             // Get active AP path
             let active_path = wifi
                 .cached_property("ActiveAccessPoint")
-                .and_then(|v| v.get::<String>())
+                .and_then(|v| objpath_to_string(&v))
                 .filter(|p| !p.is_empty() && p != "/");
 
             // Get LastScan timestamp
@@ -1048,7 +1025,7 @@ impl NetworkService {
         let paths: Vec<String> = result
             .child_value(0)
             .iter()
-            .filter_map(|v| v.get::<String>())
+            .filter_map(|v| objpath_to_string(&v))
             .collect();
 
         Ok(paths)
@@ -1095,8 +1072,11 @@ impl NetworkService {
             .and_then(|v| v.get::<u32>())
             .unwrap_or(0);
 
-        let secured = flags != 0 || wpa_flags != 0 || rsn_flags != 0;
-        let security = if secured { "secured" } else { "open" }.to_string();
+        let security = if flags != 0 || wpa_flags != 0 || rsn_flags != 0 {
+            SecurityType::Secured
+        } else {
+            SecurityType::Open
+        };
 
         let ssid_str = ssid.unwrap_or_default();
         let is_active = active_path.as_ref().is_some_and(|ap| ap == path);
@@ -1107,7 +1087,9 @@ impl NetworkService {
             strength,
             security,
             active: is_active,
+            known_network_path: None,
             known: is_known,
+            path: None,
         })
     }
 
@@ -1153,10 +1135,10 @@ impl NetworkService {
     fn dedupe_networks(networks: Vec<WifiNetwork>) -> Vec<WifiNetwork> {
         use std::collections::HashMap;
 
-        let mut merged: HashMap<(String, String), WifiNetwork> = HashMap::new();
+        let mut merged: HashMap<(String, SecurityType), WifiNetwork> = HashMap::new();
 
         for net in networks {
-            let key = (net.ssid.clone(), net.security.clone());
+            let key = (net.ssid.clone(), net.security);
             if let Some(existing) = merged.get_mut(&key) {
                 existing.active = existing.active || net.active;
                 existing.strength = existing.strength.max(net.strength);
@@ -1245,7 +1227,11 @@ impl NetworkService {
         self.callbacks.notify(&snapshot_clone);
 
         // RequestScan expects (a{sv}) - empty options dict
-        let empty_dict = Variant::parse(Some(VariantTy::new("a{sv}").unwrap()), "{}").unwrap();
+        let empty_dict = Variant::parse(
+            Some(VariantTy::new("a{sv}").expect("valid GVariant type string")),
+            "{}",
+        )
+        .expect("valid empty dict literal for a{sv}");
         let args = Variant::tuple_from_iter([empty_dict]);
 
         wifi.call(
@@ -1272,7 +1258,14 @@ impl NetworkService {
     }
 
     /// Connect to a Wi-Fi network by SSID.
-    pub fn connect_to_ssid(&self, ssid: &str, password: Option<&str>) {
+    ///
+    /// Uses `nmcli device wifi connect` to establish the connection.
+    /// If a password is provided, it's passed to nmcli.
+    ///
+    /// # Parameters
+    /// - `ssid`: Network name to connect to
+    /// - `password`: Optional password for secured networks
+    pub fn connect_to_network(&self, ssid: &str, password: Option<&str>) {
         let ssid = ssid.trim().to_string();
         if ssid.is_empty() {
             return;
@@ -1374,8 +1367,11 @@ impl NetworkService {
     }
 }
 
-/// Send an update to the main thread via glib::idle_add_once().
-/// This wakes the GLib main loop immediately (no polling).
+/// Send an update from a background thread to the main GLib loop.
+///
+/// # Thread safety
+/// Safe to call from any thread — `glib::idle_add_once` marshals the
+/// closure to the main loop.
 fn send_network_update(update: NetworkUpdate) {
     glib::idle_add_once(move || {
         NetworkService::global().apply_update(update);

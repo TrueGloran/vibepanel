@@ -310,6 +310,10 @@ impl BaseWidget {
                         .map(|m| m.is_visible())
                         .unwrap_or(false);
 
+                    // Cancel any pending or visible tooltips to prevent them from
+                    // appearing after the click
+                    TooltipManager::global().cancel_and_hide();
+
                     // Dismiss any active popup (enables seamless transitions)
                     PopoverTracker::global().dismiss_active();
 

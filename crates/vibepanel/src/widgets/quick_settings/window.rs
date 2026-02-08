@@ -20,12 +20,13 @@ use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
+use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
-use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
+use crate::services::wifi::WifiService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
     Dismissible, calculate_bar_exclusive_zone, calculate_popover_right_margin,
@@ -68,6 +69,29 @@ fn set_current_qs_window(qs: &Rc<QuickSettingsWindow>) {
     });
 }
 
+/// GObject data key for the back-reference to [`QuickSettingsWindow`].
+const QS_WINDOW_DATA_KEY: &str = "vibepanel-qs-window";
+
+/// Store a [`Weak`] back-reference to [`QuickSettingsWindow`] on a window.
+///
+/// Pairs with [`get_qs_window_data`] to encapsulate the `unsafe` type-tag invariant.
+pub(super) fn set_qs_window_data(window: &ApplicationWindow, qs: &Rc<QuickSettingsWindow>) {
+    unsafe {
+        window.set_data(QS_WINDOW_DATA_KEY, Rc::downgrade(qs));
+    }
+}
+
+/// Retrieve the [`QuickSettingsWindow`] back-reference from an [`ApplicationWindow`].
+///
+/// Returns `Some` if the window has a valid, still-alive reference.
+pub(super) fn get_qs_window_data(window: &ApplicationWindow) -> Option<Rc<QuickSettingsWindow>> {
+    unsafe {
+        window
+            .data::<Weak<QuickSettingsWindow>>(QS_WINDOW_DATA_KEY)
+            .and_then(|ptr| ptr.as_ref().upgrade())
+    }
+}
+
 /// Clear the current QuickSettingsWindow reference.
 fn clear_current_qs_window() {
     CURRENT_QS_WINDOW.with(|cell| {
@@ -100,6 +124,8 @@ pub struct QuickSettingsWindow {
     anchor_monitor: RefCell<Option<Monitor>>,
     cards_config: QuickSettingsCardsConfig,
     scroll_container: ScrolledWindow,
+    /// WiFi service callback ID, used to unsubscribe on close.
+    wifi_callback_id: Cell<Option<CallbackId>>,
 
     // Card states
     pub wifi: Rc<WifiCardState>,
@@ -154,6 +180,7 @@ impl QuickSettingsWindow {
             anchor_monitor: RefCell::new(None),
             cards_config,
             scroll_container,
+            wifi_callback_id: Cell::new(None),
             wifi: Rc::new(WifiCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
             vpn: Rc::new(VpnCardState::new()),
@@ -174,12 +201,7 @@ impl QuickSettingsWindow {
         SurfaceStyleManager::global().apply_pango_attrs_all(&outer);
 
         // Store a back-reference on the window so callbacks can access the QuickSettingsWindow.
-        // SAFETY: We own the Rc<QuickSettingsWindow> and store a Weak reference. The data lives
-        // as long as the window, and we only access it via upgrade() which handles dropped refs.
-        unsafe {
-            qs.window
-                .set_data("vibepanel-qs-window", Rc::downgrade(&qs));
-        }
+        set_qs_window_data(&qs.window, &qs);
 
         // ESC key closes the panel
         {
@@ -209,11 +231,12 @@ impl QuickSettingsWindow {
 
         if cfg.wifi {
             let qs_weak = Rc::downgrade(qs);
-            NetworkService::global().connect(move |snapshot| {
+            let id = WifiService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     wifi_card::on_network_changed(&qs.wifi, snapshot, &qs.window);
                 }
             });
+            qs.wifi_callback_id.set(Some(id));
         }
 
         if cfg.bluetooth {
@@ -346,7 +369,7 @@ impl QuickSettingsWindow {
                 on_toggle: None,
             });
         }
-        if cfg.vpn {
+        if cfg.vpn && VpnService::global().snapshot().available {
             let (card, revealer, expander_button) = Self::build_vpn_card(qs);
             toggle_cards.push(ToggleCardInfo {
                 card,
@@ -498,19 +521,19 @@ impl QuickSettingsWindow {
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
     /// accordion registration via `AccordionManager::setup_expander`.
     fn build_wifi_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
-        let network = NetworkService::global();
-        let snapshot = network.snapshot();
+        let wifi_service = WifiService::global();
+        let snapshot = wifi_service.snapshot();
 
-        let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
-        let wifi_connected = snapshot.connected;
-        let wired_connected = snapshot.wired_connected;
-        let has_wifi_device = snapshot.has_wifi_device;
+        let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
+        let wifi_connected = snapshot.connected();
+        let wired_connected = snapshot.wired_connected();
+        let has_wifi_device = snapshot.has_wifi_device();
 
         // Build custom subtitle widget with connection status icons
         let subtitle_result = build_network_subtitle(&snapshot);
 
         let icon_name = wifi_icon_name(
-            snapshot.available,
+            snapshot.available(),
             wifi_connected,
             wifi_enabled,
             wired_connected,
@@ -519,7 +542,7 @@ impl QuickSettingsWindow {
         let icon_active = (wifi_enabled && wifi_connected) || wired_connected;
 
         // Card title: "Network" if ethernet device exists, "Wi-Fi" otherwise
-        let card_title = if snapshot.has_ethernet_device {
+        let card_title = if snapshot.has_ethernet_device() {
             "Network"
         } else {
             "Wi-Fi"
@@ -539,7 +562,7 @@ impl QuickSettingsWindow {
         wifi_card.card.add_css_class(qs::WIFI);
 
         // Disable toggle if no Wi-Fi device (toggle controls Wi-Fi, not ethernet)
-        if !snapshot.has_wifi_device {
+        if !snapshot.has_wifi_device() {
             wifi_card.toggle.set_sensitive(false);
         }
 
@@ -558,7 +581,7 @@ impl QuickSettingsWindow {
                 if wifi_state.updating_toggle.get() {
                     return;
                 }
-                NetworkService::global().set_wifi_enabled(toggle.is_active());
+                WifiService::global().set_wifi_enabled(toggle.is_active());
             });
         }
 
@@ -596,7 +619,7 @@ impl QuickSettingsWindow {
                     if wifi_state.updating_toggle.get() {
                         return glib::Propagation::Proceed;
                     }
-                    NetworkService::global().set_wifi_enabled(enabled);
+                    WifiService::global().set_wifi_enabled(enabled);
                     glib::Propagation::Proceed
                 });
         }
@@ -1166,21 +1189,22 @@ impl QuickSettingsWindow {
         self.window.set_visible(true);
         self.window.present();
 
-        // After the window is mapped and has its real size, update position and fade in
+        // After the window is mapped and has its real size, update position and fade in.
+        // Also re-check for pending IWD auth requests: subscribe_to_services() fires
+        // on_network_changed before the window is mapped, so the is_mapped() gate in
+        // wifi_card defers the password dialog. This re-check catches that case.
         let window_weak = self.window.downgrade();
         glib::idle_add_local(move || {
-            if let Some(window) = window_weak.upgrade() {
-                // SAFETY: We stored Weak<QuickSettingsWindow> at window creation with this key.
-                // upgrade() safely returns None if the QuickSettingsWindow was dropped.
-                unsafe {
-                    if let Some(weak_ptr) =
-                        window.data::<Weak<QuickSettingsWindow>>("vibepanel-qs-window")
-                        && let Some(qs) = weak_ptr.as_ref().upgrade()
-                    {
-                        qs.update_position();
-                        qs.window.set_opacity(1.0);
-                    }
-                }
+            if let Some(window) = window_weak.upgrade()
+                && let Some(qs) = get_qs_window_data(&window)
+            {
+                qs.update_position();
+                qs.window.set_opacity(1.0);
+
+                // Re-deliver current snapshot now that the window is mapped,
+                // so any deferred auth prompt is shown.
+                let snapshot = WifiService::global().snapshot();
+                wifi_card::on_network_changed(&qs.wifi, &snapshot, &qs.window);
             }
             ControlFlow::Break
         });
@@ -1193,6 +1217,18 @@ impl QuickSettingsWindow {
     pub(super) fn hide_panel(&self) {
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
+
+        // Don't cancel IWD auth on close — the agent callback may arrive after panel closes.
+        // AUTH_TIMEOUT_SECS handles cleanup.
+
+        // Unsubscribe from WiFi service to clean up the dead callback
+        if let Some(id) = self.wifi_callback_id.take() {
+            WifiService::global().unsubscribe(id);
+        }
+
+        // Clear focus from any focused widget (e.g., password Entry) before closing.
+        // This prevents GTK "did not receive focus-out event" warnings.
+        gtk4::prelude::RootExt::set_focus(&self.window, None::<&gtk4::Widget>);
 
         // Clear the global QS window reference
         clear_current_qs_window();
