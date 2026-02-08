@@ -403,6 +403,10 @@ impl QuickSettingsWidget {
                     return;
                 }
 
+                // Cancel any pending or visible tooltips to prevent them from
+                // appearing after the click
+                TooltipManager::global().cancel_and_hide();
+
                 // Claim the gesture sequence to prevent BaseWidget's handler from firing
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
 
