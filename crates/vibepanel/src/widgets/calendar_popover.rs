@@ -78,7 +78,31 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     let update_header = {
         let header_label = header_label.clone();
         move |date: NaiveDate| {
-            header_label.set_label(&date.format("%B %Y").to_string());
+            // Use GTK's GDateTime for localized month names
+            // Create a DateTime in the local timezone for proper locale formatting
+            let tz = gtk4::glib::TimeZone::local();
+            if let Ok(gdt) = gtk4::glib::DateTime::new(
+                &tz,
+                date.year(),
+                date.month() as i32,
+                1, // day
+                0, // hour
+                0, // minute
+                0.0, // seconds
+            ) {
+                // Use %OB for standalone month name (nominative case)
+                if let Ok(formatted) = gdt.format("%OB %Y") {
+                    // Capitalize the first letter
+                    let mut chars = formatted.chars();
+                    if let Some(first) = chars.next() {
+                        let capitalized = first.to_uppercase().chain(chars).collect::<String>();
+                        header_label.set_label(&capitalized);
+                        return;
+                    }
+                }
+            }
+            // Fallback to chrono if GDateTime fails
+            // header_label.set_label(&date.format("%B %Y").to_string());
         }
     };
 

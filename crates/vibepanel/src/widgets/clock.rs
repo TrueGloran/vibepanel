@@ -5,7 +5,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use chrono::Timelike;
 use gtk4::Label;
 use gtk4::glib::{self, SourceId};
 use tracing::debug;
@@ -109,32 +108,32 @@ impl ClockWidget {
 
     /// Update the displayed time.
     fn update_time(&self) {
-        let now = chrono::Local::now();
-        let text = now.format(&self.format).to_string();
+        let now = glib::DateTime::now_local().expect("Failed to get local time");
+        let text = now.format(&self.format).expect("Failed to format time").to_string();
         self.label.set_label(&text);
         debug!("Clock updated: {}", text);
     }
 
     /// Schedule the next tick on the next minute boundary.
     fn schedule_minute_tick(&self) {
-        let now = chrono::Local::now();
-        let delay_seconds = 60 - now.second();
+        let now = glib::DateTime::now_local().expect("Failed to get local time");
+        let delay_seconds = (60 - now.second()) as u32;
 
         let label = self.label.clone();
         let format = self.format.clone();
         let timer_source = Rc::clone(&self.timer_source);
 
         let source_id = glib::timeout_add_seconds_local_once(delay_seconds, move || {
-            let now = chrono::Local::now();
-            let text = now.format(&format).to_string();
+            let now = glib::DateTime::now_local().expect("Failed to get local time");
+            let text = now.format(&format).expect("Failed to format time").to_string();
             label.set_label(&text);
 
             let label_clone = label.clone();
             let format_clone = format.clone();
             let timer_source_clone = Rc::clone(&timer_source);
             let repeating_id = glib::timeout_add_seconds_local(60, move || {
-                let now = chrono::Local::now();
-                let text = now.format(&format_clone).to_string();
+                let now = glib::DateTime::now_local().expect("Failed to get local time");
+                let text = now.format(&format_clone).expect("Failed to format time").to_string();
                 label_clone.set_label(&text);
                 glib::ControlFlow::Continue
             });
@@ -143,7 +142,6 @@ impl ClockWidget {
         });
 
         *self.timer_source.borrow_mut() = Some(source_id);
-
         debug!("Clock tick scheduled in {} seconds", delay_seconds);
     }
 }
