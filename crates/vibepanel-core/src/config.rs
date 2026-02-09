@@ -13,6 +13,9 @@ use toml::Table;
 
 use crate::error::{Error, Result};
 
+/// Known valid values for bar.layer.
+const VALID_LAYERS: &[&str] = &["background", "bottom", "top", "overlay"];
+
 /// Known valid values for advanced.compositor.
 const VALID_COMPOSITORS: &[&str] = &["auto", "mango", "hyprland", "niri"];
 
@@ -201,6 +204,15 @@ impl Config {
             ));
         }
 
+        // Validate bar.layer
+        if !VALID_LAYERS.contains(&self.bar.layer.as_str()) {
+            errors.push(format!(
+                "bar.layer: invalid value '{}', expected one of: {}",
+                self.bar.layer,
+                VALID_LAYERS.join(", ")
+            ));
+        }
+
         // Validate theme.mode
         if !VALID_THEME_MODES.contains(&self.theme.mode.as_str()) {
             errors.push(format!(
@@ -320,6 +332,7 @@ impl Config {
         if !self.bar.outputs.is_empty() {
             lines.push(format!("  outputs: {:?}", self.bar.outputs));
         }
+        lines.push(format!("  layer: {}", self.bar.layer));
 
         lines.push("\nWidgets:".to_string());
         lines.push(format!(
@@ -438,6 +451,9 @@ pub struct BarConfig {
     /// Bar background opacity (0.0 = fully transparent, 1.0 = fully opaque).
     /// Default: 0.0 (transparent bar for "islands" look).
     pub background_opacity: f64,
+
+    /// Layer shell layer: "background", "bottom", "top", "overlay".
+    pub layer: String,
 }
 
 impl Default for BarConfig {
@@ -453,6 +469,7 @@ impl Default for BarConfig {
             outputs: Vec::new(),
             background_color: None,
             background_opacity: 0.0,
+            layer: "top".to_string(),
         }
     }
 }
@@ -1049,6 +1066,29 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_validate_invalid_layer() {
+        let mut config = Config::default();
+        config.bar.layer = "middle".to_string();
+
+        let result = config.validate();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bar.layer"));
+        assert!(msg.contains("middle"));
+    }
+
+    #[test]
+    fn test_validate_valid_layers() {
+        for layer in ["background", "bottom", "top", "overlay"] {
+            let mut config = Config::default();
+            config.bar.layer = layer.to_string();
+            assert!(config.validate().is_ok(), "layer '{}' should be valid", layer);
+        }
+    }    
 
     #[test]
     fn test_default_config() {

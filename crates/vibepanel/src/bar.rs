@@ -14,6 +14,22 @@ use crate::sectioned_bar::SectionedBar;
 use crate::styles::class;
 use crate::widgets::{self, BarState, QuickSettingsConfig, WidgetConfig, WidgetFactory};
 
+fn parse_layer(layer_str: &str) -> Layer {
+    match layer_str {
+        "background" => Layer::Background,
+        "bottom" => Layer::Bottom,
+        "top" => Layer::Top,
+        "overlay" => Layer::Overlay,
+        _ => {
+            warn!(
+                "Invalid layer value '{}', falling back to 'top'",
+                layer_str
+            );
+            Layer::Top
+        }
+    }
+}
+
 /// Create and configure the bar window with layer-shell.
 ///
 /// The `state` parameter is used to store widget handles, keeping them alive
@@ -49,7 +65,9 @@ pub fn create_bar_window(
 
     // Initialize layer-shell
     window.init_layer_shell();
-    window.set_layer(Layer::Top);
+    let layer = parse_layer(&config.bar.layer);
+    window.set_layer(layer);
+    debug!("Bar layer set to: {:?}", layer);
 
     // Bind to specific monitor - this should handle width automatically
     window.set_monitor(Some(monitor));
@@ -162,9 +180,10 @@ pub fn create_bar_window(
     window.set_visible(true);
 
     info!(
-        "Bar window created: size={}px, margin={}px, monitor={:?}, widgets={}",
+        "Bar window created: size={}px, margin={}px, layer={:?}, monitor={:?}, widgets={}",
         config.bar.size,
         config.bar.screen_margin,
+        layer,
         monitor.connector(),
         state.handle_count()
     );
