@@ -27,12 +27,14 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     // Header with navigation
 
     let header_box = GtkBox::new(Orientation::Horizontal, 8);
-    header_box.set_halign(Align::Center);
+    header_box.set_halign(Align::Fill);
 
     // Month/year label - initial text is updated below via helper.
     let header_label = Label::new(None);
     header_label.add_css_class(surface::POPOVER_TITLE);
     header_label.set_valign(Align::Start);
+    header_label.set_hexpand(true);
+    header_label.set_halign(Align::Center);
 
     header_box.append(&header_label);
     container.append(&header_box);
@@ -149,7 +151,9 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
 
     let prev_button = Button::from_icon_name("go-previous-symbolic");
     prev_button.add_css_class(surface::POPOVER_ICON_BTN);
+    prev_button.set_halign(Align::Start);
     prev_button.set_valign(Align::Start);
+    prev_button.set_hexpand(false);
     if let Some(child) = prev_button.child() {
         child.set_halign(gtk4::Align::Center);
         child.set_valign(gtk4::Align::Center);
@@ -182,7 +186,9 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
 
     let next_button = Button::from_icon_name("go-next-symbolic");
     next_button.add_css_class(surface::POPOVER_ICON_BTN);
+    next_button.set_halign(Align::End);
     next_button.set_valign(Align::Start);
+    next_button.set_hexpand(false);
     if let Some(child) = next_button.child() {
         child.set_halign(gtk4::Align::Center);
         child.set_valign(gtk4::Align::Center);
