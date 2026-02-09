@@ -294,6 +294,17 @@ impl TooltipManager {
             .borrow_mut()
             .insert(widget_addr, text.to_string());
 
+        // If the tooltip is currently visible for this widget, update it live
+        if let Some(ref current_weak) = *self.current_widget.borrow()
+            && let Some(current) = current_weak.upgrade()
+            && current.as_ptr() as usize == widget_addr
+        {
+            *self.current_text.borrow_mut() = text.to_string();
+            if let Some(ref tw) = *self.tooltip_window.borrow() {
+                tw.label.set_text(text);
+            }
+        }
+
         // Only set up controllers once per widget
         if self.setup_widgets.borrow().contains(&widget_addr) {
             return;
