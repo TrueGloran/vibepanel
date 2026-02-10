@@ -8,7 +8,7 @@
 use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::prelude::*;
 use gtk4::{Box as GtkBox, GestureClick};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::QuickSettingsWindowHandle;
 use super::audio_card::volume_icon_name;
@@ -29,15 +29,9 @@ use vibepanel_core::config::WidgetEntry;
 
 /// Configuration for which cards are shown in Quick Settings.
 ///
-/// All cards default to `true` (shown). Users can disable specific
-/// cards they don't need in their config.toml:
-///
-/// ```toml
-/// [widgets.quick_settings]
-/// vpn = false
-/// idle_inhibitor = false
-/// vpn_close_on_connect = true  # close panel when VPN connects successfully
-/// ```
+/// These options are set in the `[widgets.quick_settings]` TOML section
+/// alongside widget-level settings — see [`QuickSettingsConfig`] for a
+/// complete example.
 #[derive(Debug, Clone)]
 pub struct QuickSettingsCardsConfig {
     pub wifi: bool,
@@ -72,10 +66,23 @@ impl Default for QuickSettingsCardsConfig {
 }
 
 /// Configuration for the Quick Settings widget.
-#[derive(Debug, Clone, Default)]
+///
+/// Includes card visibility toggles (see [`QuickSettingsCardsConfig`])
+/// and widget-level settings.
+///
+/// ```toml
+/// [widgets.quick_settings]
+/// vpn = false                          # hide the VPN card
+/// idle_inhibitor = false               # hide the idle inhibitor card
+/// vpn_close_on_connect = true          # close panel when VPN connects successfully
+/// audio_scroll_percentage = 5          # volume change per scroll tick (% points, 1..=25)
+/// ```
+#[derive(Debug, Clone)]
 pub struct QuickSettingsConfig {
     /// Which cards to show in the Quick Settings panel.
     pub cards: QuickSettingsCardsConfig,
+    /// Volume delta (percentage points) for scroll on QS widget/window.
+    pub audio_scroll_percentage: i32,
 }
 
 impl WidgetConfig for QuickSettingsConfig {
@@ -91,8 +98,27 @@ impl WidgetConfig for QuickSettingsConfig {
             "brightness",
             "power",
             "vpn_close_on_connect",
+            "audio_scroll_percentage",
         ];
         warn_unknown_options("quick_settings", entry, known_options);
+
+        let audio_scroll_percentage = entry
+            .options
+            .get("audio_scroll_percentage")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as i32)
+            .unwrap_or(QuickSettingsConfig::DEFAULT_AUDIO_SCROLL_PERCENTAGE);
+
+        let audio_scroll_percentage = {
+            let clamped = audio_scroll_percentage.clamp(1, 25);
+            if clamped != audio_scroll_percentage {
+                warn!(
+                    "audio_scroll_percentage = {} is outside valid range 1..=25, clamping to {}",
+                    audio_scroll_percentage, clamped
+                );
+            }
+            clamped
+        };
 
         let get_bool = |key: &str| -> bool {
             entry
@@ -115,8 +141,22 @@ impl WidgetConfig for QuickSettingsConfig {
                 power: get_bool("power"),
                 vpn_close_on_connect: get_bool("vpn_close_on_connect"),
             },
+            audio_scroll_percentage,
         }
     }
+}
+
+impl Default for QuickSettingsConfig {
+    fn default() -> Self {
+        Self {
+            cards: QuickSettingsCardsConfig::default(),
+            audio_scroll_percentage: Self::DEFAULT_AUDIO_SCROLL_PERCENTAGE,
+        }
+    }
+}
+
+impl QuickSettingsConfig {
+    const DEFAULT_AUDIO_SCROLL_PERCENTAGE: i32 = 5;
 }
 
 /// Bar-side Quick Settings indicator.
@@ -132,6 +172,7 @@ impl QuickSettingsWidget {
         // Build icons only for enabled cards (order: Audio, Bluetooth, Wi-Fi, VPN)
         // Audio icon
         if cards.audio {
+            let volume_scroll_step = cfg.audio_scroll_percentage;
             let audio_snapshot = AudioService::global().current();
             let audio_icon_name_initial =
                 volume_icon_name(audio_snapshot.volume, audio_snapshot.muted);
@@ -171,6 +212,12 @@ impl QuickSettingsWidget {
                 };
                 TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
             });
+
+            // Scroll wheel adjusts volume when hovering the audio icon.
+            super::audio_card::attach_volume_scroll_controller(
+                &audio_icon.widget(),
+                volume_scroll_step,
+            );
         }
 
         // Bluetooth icon
