@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::services::audio::AudioService;
 use crate::services::brightness::BrightnessService;
+use crate::services::callbacks::CallbackId;
 use crate::styles::{color, osd};
 
 use gtk4::gdk;
@@ -184,6 +185,10 @@ pub struct OsdOverlay {
 
     // IPC listener for CLI commands (kept alive for the lifetime of the overlay).
     _ipc_listener: RefCell<Option<Rc<RefCell<OsdIpcListener>>>>,
+
+    // Callback IDs for deterministic cleanup.
+    brightness_callback_id: Cell<Option<CallbackId>>,
+    audio_callback_id: Cell<Option<CallbackId>>,
 }
 
 impl OsdOverlay {
@@ -254,6 +259,8 @@ impl OsdOverlay {
             last_volume: Cell::new(0),
             last_muted: Cell::new(false),
             _ipc_listener: RefCell::new(None),
+            brightness_callback_id: Cell::new(None),
+            audio_callback_id: Cell::new(None),
         });
 
         overlay.connect_brightness();
@@ -382,11 +389,12 @@ impl OsdOverlay {
         let service = BrightnessService::global();
         let this_weak = Rc::downgrade(self);
 
-        service.connect(move |snapshot: &BrightnessSnapshot| {
+        let id = service.connect(move |snapshot: &BrightnessSnapshot| {
             if let Some(this) = this_weak.upgrade() {
                 this.on_brightness_changed(snapshot);
             }
         });
+        self.brightness_callback_id.set(Some(id));
     }
 
     fn on_brightness_changed(self: &Rc<Self>, snapshot: &BrightnessSnapshot) {
@@ -430,11 +438,12 @@ impl OsdOverlay {
         let service = AudioService::global();
         let this_weak = Rc::downgrade(self);
 
-        service.connect(move |snapshot: &AudioSnapshot| {
+        let id = service.connect(move |snapshot: &AudioSnapshot| {
             if let Some(this) = this_weak.upgrade() {
                 this.on_audio_changed(snapshot);
             }
         });
+        self.audio_callback_id.set(Some(id));
     }
 
     fn on_audio_changed(self: &Rc<Self>, snapshot: &AudioSnapshot) {
@@ -539,5 +548,16 @@ impl OsdOverlay {
         // Store the listener to keep it alive.
         *self._ipc_listener.borrow_mut() = Some(listener);
         debug!("OSD IPC listener connected");
+    }
+}
+
+impl Drop for OsdOverlay {
+    fn drop(&mut self) {
+        if let Some(id) = self.brightness_callback_id.take() {
+            BrightnessService::global().disconnect(id);
+        }
+        if let Some(id) = self.audio_callback_id.take() {
+            AudioService::global().disconnect(id);
+        }
     }
 }

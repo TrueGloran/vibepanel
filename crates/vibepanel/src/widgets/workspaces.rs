@@ -22,6 +22,7 @@ use gtk4::{Align, Box as GtkBox, GestureClick, Label, Widget};
 use tracing::{debug, trace};
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::tooltip::TooltipManager;
 use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSnapshot};
@@ -307,6 +308,8 @@ impl Default for WorkspacesConfig {
 pub struct WorkspacesWidget {
     /// Shared base widget container.
     base: BaseWidget,
+    /// Callback ID for WorkspaceService, used to disconnect on drop.
+    workspace_callback_id: CallbackId,
 }
 
 impl WorkspacesWidget {
@@ -360,7 +363,7 @@ impl WorkspacesWidget {
 
         // Connect to workspace service.
         // The callback owns its own Rc clones of the state.
-        WorkspaceService::global().connect(move |snapshot| {
+        let workspace_callback_id = WorkspaceService::global().connect(move |snapshot| {
             update_indicators(
                 &content_box,
                 ws_container.as_ref(),
@@ -380,12 +383,21 @@ impl WorkspacesWidget {
             "WorkspacesWidget created (output_id: {:?})",
             output_id_debug
         );
-        Self { base }
+        Self {
+            base,
+            workspace_callback_id,
+        }
     }
 
     /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &GtkBox {
         self.base.widget()
+    }
+}
+
+impl Drop for WorkspacesWidget {
+    fn drop(&mut self) {
+        WorkspaceService::global().disconnect(self.workspace_callback_id);
     }
 }
 

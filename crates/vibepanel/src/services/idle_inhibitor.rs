@@ -23,7 +23,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use tracing::{debug, warn};
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 /// Canonical snapshot of idle inhibitor state.
 #[derive(Debug, Clone)]
@@ -116,15 +116,21 @@ impl IdleInhibitorService {
     }
 
     /// Register a callback to be invoked whenever the inhibitor state changes.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&IdleInhibitorSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
         // Immediately send current snapshot.
         let snapshot = self.snapshot.borrow().clone();
-        self.callbacks.notify(&snapshot);
+        self.callbacks.notify_single(id, &snapshot);
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Return the current inhibitor snapshot.

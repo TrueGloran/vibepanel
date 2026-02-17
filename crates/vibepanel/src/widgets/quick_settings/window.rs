@@ -126,8 +126,15 @@ pub struct QuickSettingsWindow {
     cards_config: QuickSettingsCardsConfig,
     audio_scroll_percentage: i32,
     scroll_container: ScrolledWindow,
-    /// Network service callback ID, used to unsubscribe on close.
+    /// Service callback IDs, used to disconnect/unsubscribe on close.
     network_callback_id: Cell<Option<CallbackId>>,
+    bluetooth_callback_id: Cell<Option<CallbackId>>,
+    vpn_callback_id: Cell<Option<CallbackId>>,
+    idle_inhibitor_callback_id: Cell<Option<CallbackId>>,
+    audio_output_callback_id: Cell<Option<CallbackId>>,
+    audio_mic_callback_id: Cell<Option<CallbackId>>,
+    brightness_callback_id: Cell<Option<CallbackId>>,
+    updates_callback_id: Cell<Option<CallbackId>>,
 
     // Card states
     pub network: Rc<NetworkCardState>,
@@ -184,6 +191,13 @@ impl QuickSettingsWindow {
             audio_scroll_percentage: config.audio_scroll_percentage,
             scroll_container,
             network_callback_id: Cell::new(None),
+            bluetooth_callback_id: Cell::new(None),
+            vpn_callback_id: Cell::new(None),
+            idle_inhibitor_callback_id: Cell::new(None),
+            audio_output_callback_id: Cell::new(None),
+            audio_mic_callback_id: Cell::new(None),
+            brightness_callback_id: Cell::new(None),
+            updates_callback_id: Cell::new(None),
             network: Rc::new(NetworkCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
             vpn: Rc::new(VpnCardState::new()),
@@ -244,17 +258,18 @@ impl QuickSettingsWindow {
 
         if cfg.bluetooth {
             let qs_weak = Rc::downgrade(qs);
-            BluetoothService::global().connect(move |snapshot| {
+            let id = BluetoothService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     bluetooth_card::on_bluetooth_changed(&qs.bluetooth, snapshot);
                 }
             });
+            qs.bluetooth_callback_id.set(Some(id));
         }
 
         if cfg.vpn {
             let qs_weak = Rc::downgrade(qs);
             let close_on_connect = cfg.vpn_close_on_connect;
-            VpnService::global().connect(move |snapshot| {
+            let id = VpnService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     let connect_completed = vpn_card::on_vpn_changed(&qs.vpn, snapshot);
                     if connect_completed && close_on_connect {
@@ -262,51 +277,57 @@ impl QuickSettingsWindow {
                     }
                 }
             });
+            qs.vpn_callback_id.set(Some(id));
         }
 
         if cfg.idle_inhibitor {
             let qs_weak = Rc::downgrade(qs);
-            IdleInhibitorService::global().connect(move |snapshot| {
+            let id = IdleInhibitorService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     idle_inhibitor_card::on_idle_inhibitor_changed(&qs.idle_inhibitor, snapshot);
                 }
             });
+            qs.idle_inhibitor_callback_id.set(Some(id));
         }
 
         if cfg.audio {
             let qs_weak = Rc::downgrade(qs);
-            AudioService::global().connect(move |snapshot| {
+            let id = AudioService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     audio_card::on_audio_changed(&qs.audio, snapshot);
                 }
             });
+            qs.audio_output_callback_id.set(Some(id));
         }
 
         if cfg.mic {
             let qs_weak = Rc::downgrade(qs);
-            AudioService::global().connect(move |snapshot| {
+            let id = AudioService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     mic_card::on_mic_changed(&qs.mic, snapshot);
                 }
             });
+            qs.audio_mic_callback_id.set(Some(id));
         }
 
         if cfg.brightness {
             let qs_weak = Rc::downgrade(qs);
-            BrightnessService::global().connect(move |snapshot| {
+            let id = BrightnessService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     brightness_card::on_brightness_changed(&qs.brightness, snapshot);
                 }
             });
+            qs.brightness_callback_id.set(Some(id));
         }
 
         if cfg.updates {
             let qs_weak = Rc::downgrade(qs);
-            UpdatesService::global().connect(move |snapshot| {
+            let id = UpdatesService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     updates_card::on_updates_changed(&qs.updates, snapshot);
                 }
             });
+            qs.updates_callback_id.set(Some(id));
         }
     }
 
@@ -1235,9 +1256,32 @@ impl QuickSettingsWindow {
         // Don't cancel IWD auth on close — the agent callback may arrive after panel closes.
         // AUTH_TIMEOUT_SECS handles cleanup.
 
-        // Unsubscribe from WiFi service to clean up the dead callback
+        // Disconnect from network service to clean up the dead callback
         if let Some(id) = self.network_callback_id.take() {
             NetworkService::global().unsubscribe(id);
+        }
+
+        // Disconnect from all other services
+        if let Some(id) = self.bluetooth_callback_id.take() {
+            BluetoothService::global().disconnect(id);
+        }
+        if let Some(id) = self.vpn_callback_id.take() {
+            VpnService::global().disconnect(id);
+        }
+        if let Some(id) = self.idle_inhibitor_callback_id.take() {
+            IdleInhibitorService::global().disconnect(id);
+        }
+        if let Some(id) = self.audio_output_callback_id.take() {
+            AudioService::global().disconnect(id);
+        }
+        if let Some(id) = self.audio_mic_callback_id.take() {
+            AudioService::global().disconnect(id);
+        }
+        if let Some(id) = self.brightness_callback_id.take() {
+            BrightnessService::global().disconnect(id);
+        }
+        if let Some(id) = self.updates_callback_id.take() {
+            UpdatesService::global().disconnect(id);
         }
 
         // Clear focus from any focused widget (e.g., password Entry) before closing.
