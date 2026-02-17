@@ -188,6 +188,7 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         // Wired networking
         "network-wired" => "lan",
         "network-wired-symbolic" => "lan",
+        "network-transmit-receive-symbolic" => "swap_horiz",
         "network-offline-symbolic" => "settings_ethernet",
 
         // Simplified Wi-Fi names
@@ -273,6 +274,18 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         // Pop-out / open external window
         "window-new-symbolic" => "open_in_new",
         "view-fullscreen-symbolic" => "fullscreen",
+
+        // System monitor icons (CPU, RAM, load)
+        "cpu-symbolic" => "memory",
+        "ram-symbolic" => "memory_alt",
+        "system-monitor-symbolic" => "speed",
+
+        // Directional arrows
+        "go-down-symbolic" => "arrow_downward",
+        "go-up-symbolic" => "arrow_upward",
+
+        // Media album art placeholder
+        "media-album" => "album",
 
         // Loading / progress spinner
         "process-working-symbolic" => "progress_activity",
@@ -394,6 +407,7 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
         "notifications" => &[
             "preferences-system-notifications-symbolic",
             "notification-symbolic",
+            "notifications-symbolic",
             "bell-symbolic",
         ],
         "notifications-disabled" => &[
@@ -404,6 +418,8 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
         "notifications-active" => &[
             "preferences-system-notifications-symbolic",
             "notification-symbolic",
+            "notification-active-symbolic",
+            "notifications-symbolic",
             "bell-symbolic",
         ],
 
@@ -411,26 +427,36 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
         "display-brightness-off-symbolic" => &[
             "display-brightness-off-symbolic",
             "display-brightness-symbolic",
+            "brightness-low-symbolic",
+            "video-display-brightness-symbolic",
             "brightness-display-symbolic",
         ],
         "display-brightness-low-symbolic" => &[
             "display-brightness-low-symbolic",
             "display-brightness-symbolic",
+            "brightness-low-symbolic",
+            "video-display-brightness-symbolic",
             "brightness-display-symbolic",
         ],
         "display-brightness-medium-symbolic" => &[
             "display-brightness-medium-symbolic",
             "display-brightness-symbolic",
+            "brightness-high-symbolic",
+            "video-display-brightness-symbolic",
             "brightness-display-symbolic",
         ],
         "display-brightness-high-symbolic" => &[
             "display-brightness-high-symbolic",
             "display-brightness-symbolic",
+            "brightness-high-symbolic",
+            "video-display-brightness-symbolic",
             "brightness-display-symbolic",
         ],
         "display-brightness-symbolic" => &[
             "display-brightness-symbolic",
             "display-brightness-medium-symbolic",
+            "brightness-high-symbolic",
+            "video-display-brightness-symbolic",
             "brightness-display-symbolic",
         ],
 
@@ -537,38 +563,68 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "network-cellular-signal-excellent-symbolic",
             "network-cellular-signal-good-symbolic",
             "network-cellular-symbolic",
-            "network-wireless-signal-excellent-symbolic",
+            "network-mobile-100-symbolic",
+            "network-mobile-80-symbolic",
         ],
         "network-cellular-signal-good-symbolic" => &[
             "network-cellular-signal-good-symbolic",
             "network-cellular-signal-ok-symbolic",
             "network-cellular-symbolic",
-            "network-wireless-signal-good-symbolic",
+            "network-mobile-80-symbolic",
+            "network-mobile-60-symbolic",
         ],
         "network-cellular-signal-ok-symbolic" => &[
             "network-cellular-signal-ok-symbolic",
             "network-cellular-signal-weak-symbolic",
             "network-cellular-symbolic",
-            "network-wireless-signal-ok-symbolic",
+            "network-mobile-60-symbolic",
+            "network-mobile-40-symbolic",
         ],
         "network-cellular-signal-weak-symbolic" => &[
             "network-cellular-signal-weak-symbolic",
             "network-cellular-signal-none-symbolic",
             "network-cellular-symbolic",
-            "network-wireless-signal-weak-symbolic",
+            "network-mobile-40-symbolic",
+            "network-mobile-20-symbolic",
         ],
         "network-cellular-signal-none-symbolic" => &[
             "network-cellular-signal-none-symbolic",
             "network-cellular-offline-symbolic",
             "network-cellular-no-route-symbolic",
             "network-cellular-symbolic",
-            "network-wireless-signal-none-symbolic",
+            "network-mobile-20-symbolic",
+            "network-mobile-0-symbolic",
         ],
         // Combined Wi-Fi + Cellular — only used with Material; GTK falls back to wifi icon
         "network-wifi-cellular-symbolic" => &[
             "network-wireless-signal-excellent-symbolic",
             "network-wireless-connected-symbolic",
         ],
+
+        // Wired networking
+        "network-wired-symbolic" => &[
+            "network-wired-symbolic",
+            "network-wired-activated",
+            "network-wired",
+            "preferences-system-network-ethernet",
+            "network-connect",
+        ],
+        "network-wired" => &[
+            "network-wired",
+            "network-wired-symbolic",
+            "network-wired-activated",
+            "preferences-system-network-ethernet",
+        ],
+
+        // Network transfer activity (for sysinfo up/down speeds)
+        "network-transmit-receive-symbolic" => &[
+            "network-transmit-receive-symbolic",
+            "network-idle-symbolic",
+            "network-connect-symbolic",
+            "network-workgroup-symbolic",
+            "network-wired-symbolic",
+        ],
+
         "network-offline-symbolic" => &[
             "network-offline-symbolic",
             "network-error-symbolic",
@@ -587,15 +643,20 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
         "bluetooth-symbolic" => &[
             "bluetooth-symbolic",
             "bluetooth-active-symbolic",
+            "network-bluetooth-symbolic",
             "bluetooth",
         ],
         "bluetooth-active-symbolic" => &[
             "bluetooth-active-symbolic",
             "bluetooth-symbolic",
+            "network-bluetooth-activated-symbolic",
+            "network-bluetooth-symbolic",
             "bluetooth",
         ],
         "bluetooth-disabled-symbolic" => &[
             "bluetooth-disabled-symbolic",
+            "network-bluetooth-inactive-symbolic",
+            "network-bluetooth-symbolic",
             "bluetooth-symbolic",
             "bluetooth",
         ],
@@ -708,7 +769,7 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
         "system-suspend-symbolic" => &[
             "system-suspend-symbolic",
             "system-suspend",
-            "weather-clear-night-symbolic",
+            "night-light-symbolic",
         ],
         "system-lock-screen-symbolic" => &[
             "system-lock-screen-symbolic",
@@ -748,6 +809,44 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
         "media-playlist-shuffle-symbolic" => {
             &["media-playlist-shuffle-symbolic", "media-playlist-shuffle"]
         }
+        // System monitor icons (CPU, RAM, load)
+        // CPU: rocket/performance concept
+        "cpu-symbolic" => &[
+            "cpu-symbolic",
+            "speedometer-symbolic",
+            "power-profile-performance-symbolic",
+            "application-x-executable-symbolic",
+            "system-run-symbolic",
+        ],
+        "ram-symbolic" => &[
+            "ram-symbolic",
+            "memory-symbolic",
+            "drive-harddisk-symbolic",
+            "system-run-symbolic",
+        ],
+        "system-monitor-symbolic" => &[
+            "applications-engineering-symbolic",
+            "utilities-system-monitor-symbolic",
+            "configure-symbolic",
+            "preferences-system-symbolic",
+        ],
+
+        // Directional arrows
+        "go-down-symbolic" => &[
+            "go-down-symbolic",
+            "pan-down-symbolic",
+            "arrow-down-symbolic",
+        ],
+        "go-up-symbolic" => &["go-up-symbolic", "pan-up-symbolic", "arrow-up-symbolic"],
+
+        // Media album art placeholder
+        "media-album" => &[
+            "media-optical-symbolic",
+            "media-optical-cd-audio-symbolic",
+            "media-optical",
+            "audio-x-generic-symbolic",
+        ],
+
         // Pop-out / open external window
         "window-new-symbolic" => &[
             "window-new-symbolic",

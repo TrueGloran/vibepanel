@@ -88,7 +88,7 @@ impl CpuWidget {
 
         base.set_tooltip("CPU: unknown");
 
-        let icon_handle = base.add_icon("memory", &[widget::CPU_ICON]);
+        let icon_handle = base.add_icon("cpu-symbolic", &[widget::CPU_ICON]);
 
         let percentage_label = base.add_label(None, &[widget::CPU_LABEL, class::VCENTER_CAPS]);
 

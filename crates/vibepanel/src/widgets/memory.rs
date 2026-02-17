@@ -108,7 +108,7 @@ impl MemoryWidget {
 
         base.set_tooltip("Memory: unknown");
 
-        let icon_handle = base.add_icon("memory_alt", &[widget::MEMORY_ICON]);
+        let icon_handle = base.add_icon("ram-symbolic", &[widget::MEMORY_ICON]);
 
         let memory_label = base.add_label(None, &[widget::MEMORY_LABEL, class::VCENTER_CAPS]);
 
