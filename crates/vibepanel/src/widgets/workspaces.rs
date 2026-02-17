@@ -2,24 +2,218 @@
 //!
 //! Shows occupied/active workspaces with visual indicators and CSS classes.
 //! Clicking on a workspace indicator switches to that workspace.
+//!
+//! For `LabelType::None` (minimal mode), uses a custom `WorkspaceContainer`
+//! widget that reports a constant width to prevent neighboring widgets from
+//! shifting during circle-to-pill CSS transitions. Indicators are split into
+//! two groups (left-anchored and right-anchored) with the gap between them
+//! absorbing subpixel rounding drift during animations.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk4::gdk::BUTTON_PRIMARY;
+use gtk4::glib;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, GestureClick, Label};
+use gtk4::subclass::prelude::*;
+use gtk4::{Align, Box as GtkBox, GestureClick, Label, Widget};
 use tracing::{debug, trace};
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::config_manager::ConfigManager;
 use crate::services::tooltip::TooltipManager;
 use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSnapshot};
 use crate::styles::{state, widget};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
 use crate::widgets::warn_unknown_options;
+
+// ---------------------------------------------------------------------------
+// WorkspaceContainer — minimal custom widget that reports a constant width
+// and splits children into two groups (left/right anchored) to absorb
+// rounding drift during CSS min-width transitions.
+// ---------------------------------------------------------------------------
+
+mod ws_container_imp {
+    use super::*;
+    use std::cell::Cell;
+
+    #[derive(Default)]
+    pub struct WorkspaceContainer {
+        pub(super) children: RefCell<Vec<Widget>>,
+        pub(super) target_width: Cell<i32>,
+        pub(super) gap: Cell<i32>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for WorkspaceContainer {
+        const NAME: &'static str = "VibepanelWorkspaceContainer";
+        type Type = super::WorkspaceContainer;
+        type ParentType = Widget;
+
+        fn class_init(klass: &mut Self::Class) {
+            klass.set_css_name("workspace-container");
+        }
+    }
+
+    impl ObjectImpl for WorkspaceContainer {
+        fn constructed(&self) {
+            self.parent_constructed();
+            self.obj().set_overflow(gtk4::Overflow::Hidden);
+        }
+
+        fn dispose(&self) {
+            for child in self.children.borrow_mut().drain(..) {
+                child.unparent();
+            }
+        }
+    }
+
+    impl WidgetImpl for WorkspaceContainer {
+        fn request_mode(&self) -> gtk4::SizeRequestMode {
+            gtk4::SizeRequestMode::ConstantSize
+        }
+
+        fn measure(&self, orientation: gtk4::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let children = self.children.borrow();
+            if children.is_empty() {
+                return (0, 0, -1, -1);
+            }
+            if orientation == gtk4::Orientation::Horizontal {
+                let w = self.target_width.get();
+                (w, w, -1, -1)
+            } else {
+                let mut max_min = 0i32;
+                let mut max_nat = 0i32;
+                for child in children.iter() {
+                    let (cmin, cnat, _, _) = child.measure(orientation, for_size);
+                    max_min = max_min.max(cmin);
+                    max_nat = max_nat.max(cnat);
+                }
+                (max_min, max_nat, -1, -1)
+            }
+        }
+
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            let children = self.children.borrow();
+            let n = children.len();
+            if n == 0 {
+                return;
+            }
+
+            if n == 1 {
+                let (_, cw, _, _) = children[0].measure(gtk4::Orientation::Horizontal, height);
+                let x = (width - cw) / 2;
+                let t = gtk4::gsk::Transform::new()
+                    .translate(&gtk4::graphene::Point::new(x as f32, 0.0));
+                children[0].allocate(cw, height, baseline, Some(t));
+                return;
+            }
+
+            let gap = self.gap.get();
+
+            // Active-aware two-group split: the active indicator is the last
+            // child in the left group. For the common single-active case, this
+            // places the growing and shrinking indicators on opposite sides of
+            // the group boundary during adjacent workspace switches.
+            //
+            // With multiple active indicators (multi-tag view), `position()`
+            // finds the first active child; the layout is still correct but
+            // the cross-boundary property isn't guaranteed for all pairs.
+            //
+            // Left group: [0..=active_index], laid out left-to-right
+            // Right group: [active_index+1..n], laid out right-to-left
+            //
+            // The gap between groups absorbs ±1px rounding drift from integer
+            // rounding of CSS-animated min-width values mid-transition.
+            // During multi-active → fewer-active transitions, children may
+            // transiently exceed target_width while CSS transitions settle;
+            // Overflow::Hidden (set in constructed()) clips this safely.
+            let active_css = crate::styles::widget::ACTIVE;
+            let active_idx = children.iter().position(|c| c.has_css_class(active_css));
+
+            let left_count = compute_left_count(n, active_idx);
+
+            // Left group: laid out left-to-right from x=0
+            let mut x = 0i32;
+            for child in children[..left_count].iter() {
+                let (_, cw, _, _) = child.measure(gtk4::Orientation::Horizontal, height);
+                let t = gtk4::gsk::Transform::new()
+                    .translate(&gtk4::graphene::Point::new(x as f32, 0.0));
+                child.allocate(cw, height, baseline, Some(t));
+                x += cw + gap;
+            }
+
+            // Right group: laid out right-to-left from x=width
+            let mut rx = width;
+            for child in children[left_count..].iter().rev() {
+                let (_, cw, _, _) = child.measure(gtk4::Orientation::Horizontal, height);
+                rx -= cw;
+                let t = gtk4::gsk::Transform::new()
+                    .translate(&gtk4::graphene::Point::new(rx as f32, 0.0));
+                child.allocate(cw, height, baseline, Some(t));
+                rx -= gap;
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct WorkspaceContainer(ObjectSubclass<ws_container_imp::WorkspaceContainer>)
+        @extends Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
+}
+
+impl WorkspaceContainer {
+    fn new() -> Self {
+        glib::Object::builder().build()
+    }
+
+    fn set_target_width(&self, width: i32) {
+        let imp = self.imp();
+        if imp.target_width.get() != width {
+            imp.target_width.set(width);
+            self.queue_resize();
+        }
+    }
+
+    fn set_gap(&self, gap: i32) {
+        self.imp().gap.set(gap);
+    }
+
+    fn add_child(&self, child: &Widget) {
+        child.set_parent(self);
+        self.imp().children.borrow_mut().push(child.clone());
+    }
+
+    fn clear_children(&self) {
+        for child in self.imp().children.borrow_mut().drain(..) {
+            child.unparent();
+        }
+    }
+}
+
+/// Compute the left-group size for the two-group layout split.
+///
+/// Splits `n` children into a left group (laid out left-to-right) and a right
+/// group (laid out right-to-left), with the gap between them absorbing
+/// subpixel rounding drift during CSS transitions.
+///
+/// Rules:
+/// - Active child is the last in the left group (split after it).
+/// - If active is the last child, keep it in the left group but ensure the
+///   right group has at least 1 child to anchor from the right edge.
+/// - If no active child, fall back to a midpoint split.
+fn compute_left_count(n: usize, active_idx: Option<usize>) -> usize {
+    debug_assert!(n >= 2, "compute_left_count requires n >= 2, got {n}");
+    match active_idx {
+        Some(idx) if idx < n - 1 => idx + 1,
+        Some(_) => n - 1,      // active is last: right group = [last]
+        None => n.div_ceil(2), // fallback midpoint
+    }
+}
 
 /// Label type for workspace indicators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +240,16 @@ impl LabelType {
 const DEFAULT_LABEL_TYPE: LabelType = LabelType::None;
 const DEFAULT_SEPARATOR: &str = "";
 
+/// Multiplier for indicator height relative to widget_height.
+/// Used in CSS generation (bar.rs) for min-height on all indicators.
+pub(crate) const INDICATOR_HEIGHT_MULT: f64 = 0.7;
+/// Multiplier for inactive indicator width relative to widget_height.
+/// Used in both `compute_target_width` and CSS generation (bar.rs).
+pub(crate) const INDICATOR_INACTIVE_MULT: f64 = 0.7;
+/// Multiplier for active indicator width relative to widget_height.
+/// Used in both `compute_target_width` and CSS generation (bar.rs).
+pub(crate) const INDICATOR_ACTIVE_MULT: f64 = 1.0;
+
 /// Configuration for the workspaces widget.
 #[derive(Debug, Clone)]
 pub struct WorkspacesConfig {
@@ -53,11 +257,13 @@ pub struct WorkspacesConfig {
     pub label_type: LabelType,
     /// Separator string between workspace indicators.
     pub separator: String,
+    /// Whether to animate circle↔pill transitions (default: true).
+    pub animate: bool,
 }
 
 impl WidgetConfig for WorkspacesConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("workspaces", entry, &["label_type", "separator"]);
+        warn_unknown_options("workspaces", entry, &["label_type", "separator", "animate"]);
 
         let label_type = entry
             .options
@@ -73,9 +279,16 @@ impl WidgetConfig for WorkspacesConfig {
             .unwrap_or(DEFAULT_SEPARATOR)
             .to_string();
 
+        let animate = entry
+            .options
+            .get("animate")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         Self {
             label_type,
             separator,
+            animate,
         }
     }
 }
@@ -85,6 +298,7 @@ impl Default for WorkspacesConfig {
         Self {
             label_type: DEFAULT_LABEL_TYPE,
             separator: DEFAULT_SEPARATOR.to_string(),
+            animate: true,
         }
     }
 }
@@ -108,13 +322,37 @@ impl WorkspacesWidget {
     pub fn new(config: WorkspacesConfig, output_id: Option<String>) -> Self {
         let base = BaseWidget::new(&[widget::WORKSPACES]);
 
-        // Use the content box provided by BaseWidget
-        let workspace_container = base.content().clone();
+        let label_type = config.label_type;
+        let animate = config.animate;
+
+        // Cache theme sizes at construction time. These values are derived
+        // from bar.size/bar.padding, and any change to those triggers a full
+        // bar rebuild (config_structure_changed → reconfigure_all), which
+        // destroys and recreates this widget with fresh values.
+        let sizes = ConfigManager::global().theme_sizes();
+        let widget_height = sizes.widget_height;
+        let content_gap = sizes.widget_content_gap;
+
+        // For LabelType::None with animations, use a WorkspaceContainer that
+        // reports constant width and absorbs rounding drift during CSS
+        // transitions. Without animations (or for Icons/Numbers mode),
+        // indicators go directly in the content GtkBox.
+        let ws_container: Option<WorkspaceContainer> = if label_type == LabelType::None && animate {
+            let container = WorkspaceContainer::new();
+            container.set_gap(content_gap as i32);
+            base.content().append(&container);
+            Some(container)
+        } else {
+            None
+        };
+
+        // For non-minimal modes, indicators go directly in the content box.
+        let content_box = base.content().clone();
 
         // State shared with the callback (callback owns these via Rc).
-        let workspace_labels = Rc::new(RefCell::new(HashMap::new()));
+        let workspace_labels: Rc<RefCell<HashMap<i32, Widget>>> =
+            Rc::new(RefCell::new(HashMap::new()));
         let current_ids = Rc::new(RefCell::new(Vec::new()));
-        let label_type = config.label_type;
         let separator = config.separator;
 
         // Clone output_id for the debug message
@@ -124,13 +362,17 @@ impl WorkspacesWidget {
         // The callback owns its own Rc clones of the state.
         WorkspaceService::global().connect(move |snapshot| {
             update_indicators(
-                &workspace_container,
+                &content_box,
+                ws_container.as_ref(),
                 &workspace_labels,
                 &current_ids,
                 label_type,
+                animate,
                 &separator,
                 snapshot,
                 output_id.as_deref(),
+                widget_height,
+                content_gap,
             );
         });
 
@@ -155,49 +397,39 @@ const ICON_ACTIVE: &str = "◆";
 /// Clear all workspace indicator widgets from the container.
 fn clear_indicators(
     container: &GtkBox,
-    labels: &Rc<RefCell<HashMap<i32, Label>>>,
+    ws_container: Option<&WorkspaceContainer>,
+    labels: &Rc<RefCell<HashMap<i32, Widget>>>,
     ids: &Rc<RefCell<Vec<i32>>>,
 ) {
-    while let Some(child) = container.first_child() {
-        container.remove(&child);
+    if let Some(wsc) = ws_container {
+        wsc.clear_children();
+    } else {
+        while let Some(child) = container.first_child() {
+            container.remove(&child);
+        }
     }
     labels.borrow_mut().clear();
     ids.borrow_mut().clear();
 }
 
-/// Create workspace indicator labels for the given workspaces.
+/// Create workspace indicator widgets for the given workspaces.
+#[allow(clippy::too_many_arguments)]
 fn create_indicators(
     container: &GtkBox,
-    labels_cell: &Rc<RefCell<HashMap<i32, Label>>>,
+    ws_container: Option<&WorkspaceContainer>,
+    labels_cell: &Rc<RefCell<HashMap<i32, Widget>>>,
     ids_cell: &Rc<RefCell<Vec<i32>>>,
     label_type: LabelType,
+    animate: bool,
     separator: &str,
     workspaces: &[Workspace],
 ) {
-    clear_indicators(container, labels_cell, ids_cell);
+    clear_indicators(container, ws_container, labels_cell, ids_cell);
 
     let mut labels = labels_cell.borrow_mut();
     let mut ids = ids_cell.borrow_mut();
 
     for (i, workspace) in workspaces.iter().enumerate() {
-        let label_text = match label_type {
-            LabelType::Icons => ICON_EMPTY,
-            LabelType::Numbers => &workspace.name,
-            LabelType::None => "",
-        };
-
-        let label = Label::new(Some(label_text));
-        label.add_css_class(widget::WORKSPACE_INDICATOR);
-        label.add_css_class(state::CLICKABLE);
-        label.set_valign(Align::Center);
-        label.set_xalign(0.5);
-        label.set_ellipsize(EllipsizeMode::End);
-        label.set_single_line_mode(true);
-
-        if label_type == LabelType::None {
-            label.add_css_class(widget::WORKSPACE_INDICATOR_MINIMAL);
-        }
-
         // Add click handler to switch workspace
         let workspace_id = workspace.id;
         let gesture = GestureClick::new();
@@ -209,14 +441,53 @@ fn create_indicators(
             debug!("Switching to workspace {}", workspace_id);
             WorkspaceService::global().switch_workspace(workspace_id);
         });
-        label.add_controller(gesture);
 
-        labels.insert(workspace.id, label.clone());
-        container.append(&label);
+        let indicator: Widget = if label_type == LabelType::None {
+            // Minimal mode: use GtkBox to avoid font-metric intrinsic sizing.
+            // CSS min-width/min-height controls the exact circle/pill dimensions.
+            let dot = GtkBox::new(gtk4::Orientation::Horizontal, 0);
+            dot.add_css_class(widget::WORKSPACE_INDICATOR);
+            dot.add_css_class(widget::WORKSPACE_INDICATOR_MINIMAL);
+            dot.add_css_class(state::CLICKABLE);
+            if !animate {
+                dot.add_css_class(widget::WORKSPACE_NO_ANIMATE);
+            }
+            dot.set_valign(Align::Center);
+            dot.add_controller(gesture);
+            dot.upcast()
+        } else {
+            // Icons or Numbers mode: use Label directly.
+            let label_text = match label_type {
+                LabelType::Icons => ICON_EMPTY,
+                LabelType::Numbers => &workspace.name,
+                LabelType::None => unreachable!(),
+            };
+            let label = Label::new(Some(label_text));
+            label.add_css_class(widget::WORKSPACE_INDICATOR);
+            label.add_css_class(state::CLICKABLE);
+            if !animate {
+                label.add_css_class(widget::WORKSPACE_NO_ANIMATE);
+            }
+            label.set_valign(Align::Center);
+            // Optical centering: glyphs ●/○/◆ appear left-heavy at 0.5;
+            // 0.55 nudges them to look visually centered in the pill.
+            label.set_xalign(0.55);
+            label.set_ellipsize(EllipsizeMode::End);
+            label.set_single_line_mode(true);
+            label.add_controller(gesture);
+            label.upcast()
+        };
+
+        labels.insert(workspace.id, indicator.clone());
+        if let Some(wsc) = ws_container {
+            wsc.add_child(&indicator);
+        } else {
+            container.append(&indicator);
+        }
         ids.push(workspace.id);
 
-        // Add separator if not the last workspace
-        if i < workspaces.len() - 1 && !separator.is_empty() {
+        // Add separator if not the last workspace (only for non-minimal modes)
+        if ws_container.is_none() && i < workspaces.len() - 1 && !separator.is_empty() {
             let sep = Label::new(Some(separator));
             sep.set_valign(Align::Center);
             sep.add_css_class(widget::WORKSPACE_SEPARATOR);
@@ -225,20 +496,48 @@ fn create_indicators(
     }
 }
 
+/// Compute the steady-state target width for the workspace container.
+///
+/// This is the total width when all indicators are at their final sizes
+/// (no animation in progress). The container reports this constant width
+/// to prevent neighboring widgets from shifting during CSS transitions.
+fn compute_target_width(
+    widget_height: u32,
+    active_count: i32,
+    inactive_count: i32,
+    gap: i32,
+) -> i32 {
+    let wh = widget_height as f64;
+    // ceil() is intentionally conservative: CSS calc() may round fractional
+    // min-width values differently (e.g., 17.5 → 17 vs 18). Being 1px too
+    // wide is invisible; being 1px too narrow could clip. The two-group
+    // layout gap absorbs any surplus from this conservative rounding.
+    let pill_w = (wh * INDICATOR_ACTIVE_MULT).ceil();
+    let circle_w = (wh * INDICATOR_INACTIVE_MULT).ceil();
+    let indicators_w = active_count as f64 * pill_w + inactive_count as f64 * circle_w;
+    let n = active_count + inactive_count;
+    indicators_w.ceil() as i32 + (n - 1).max(0) * gap
+}
+
 /// Update workspace indicators based on the current snapshot.
 ///
 /// When `output_id` is provided:
 /// - Uses per-output workspace data if available.
 /// - For Niri: shows only workspaces belonging to this output.
 /// - For MangoWC: shows all workspaces with per-output window counts.
+#[allow(clippy::too_many_arguments)]
 fn update_indicators(
     container: &GtkBox,
-    labels_cell: &Rc<RefCell<HashMap<i32, Label>>>,
+    ws_container: Option<&WorkspaceContainer>,
+    labels_cell: &Rc<RefCell<HashMap<i32, Widget>>>,
     ids_cell: &Rc<RefCell<Vec<i32>>>,
     label_type: LabelType,
+    animate: bool,
     separator: &str,
     snapshot: &WorkspaceServiceSnapshot,
     output_id: Option<&str>,
+    widget_height: u32,
+    content_gap: u32,
 ) {
     // Get the workspace list to use - either per-output or global
     let (workspaces, active_workspaces, source): (&[Workspace], &HashSet<i32>, &str) = if let Some(
@@ -311,9 +610,28 @@ fn update_indicators(
         let current_ids = ids_cell.borrow();
         if !current_ids.is_empty() {
             drop(current_ids);
-            clear_indicators(container, labels_cell, ids_cell);
+            clear_indicators(container, ws_container, labels_cell, ids_cell);
+        }
+        if let Some(wsc) = ws_container {
+            wsc.set_target_width(0);
         }
         return;
+    }
+
+    // For minimal mode, fix the container width to the steady-state size
+    // (active pills + inactive circles + gaps). This prevents neighboring
+    // widgets from shifting during circle↔pill CSS transitions.
+    // Supports multiple active indicators (multi-tag view in DWL/mangoWC).
+    if let Some(wsc) = ws_container {
+        let active_count = display_workspaces.iter().filter(|ws| ws.active).count() as i32;
+        let inactive_count = display_workspaces.len() as i32 - active_count;
+        let total = compute_target_width(
+            widget_height,
+            active_count,
+            inactive_count,
+            content_gap as i32,
+        );
+        wsc.set_target_width(total);
     }
 
     // Check if we need to recreate indicators
@@ -321,9 +639,11 @@ fn update_indicators(
     if new_ids != *ids_cell.borrow() {
         create_indicators(
             container,
+            ws_container,
             labels_cell,
             ids_cell,
             label_type,
+            animate,
             separator,
             &display_workspaces,
         );
@@ -332,40 +652,47 @@ fn update_indicators(
     // Update indicator styling
     let labels = labels_cell.borrow();
     for workspace in &display_workspaces {
-        let Some(label) = labels.get(&workspace.id) else {
+        let Some(indicator) = labels.get(&workspace.id) else {
             continue;
         };
 
         // Remove existing state classes
-        label.remove_css_class(widget::ACTIVE);
-        label.remove_css_class(state::OCCUPIED);
-        label.remove_css_class(state::URGENT);
+        indicator.remove_css_class(widget::ACTIVE);
+        indicator.remove_css_class(state::OCCUPIED);
+        indicator.remove_css_class(state::URGENT);
 
-        // Update icon text if using icons
-        if label_type == LabelType::Icons {
-            if workspace.active {
-                label.set_text(ICON_ACTIVE);
-            } else if workspace.occupied {
-                label.set_text(ICON_OCCUPIED);
-            } else {
-                label.set_text(ICON_EMPTY);
+        // Update icon text if using Labels (Icons/Numbers mode)
+        if let Some(label) = (label_type != LabelType::None)
+            .then(|| indicator.downcast_ref::<Label>())
+            .flatten()
+        {
+            match label_type {
+                LabelType::Icons => {
+                    if workspace.active {
+                        label.set_text(ICON_ACTIVE);
+                    } else if workspace.occupied {
+                        label.set_text(ICON_OCCUPIED);
+                    } else {
+                        label.set_text(ICON_EMPTY);
+                    }
+                }
+                LabelType::Numbers => label.set_text(&workspace.name),
+                LabelType::None => unreachable!(),
             }
-        } else if label_type == LabelType::Numbers {
-            label.set_text(&workspace.name);
         }
 
         // Add appropriate state class (mutually exclusive)
         if workspace.active {
-            label.add_css_class(widget::ACTIVE);
+            indicator.add_css_class(widget::ACTIVE);
         } else if workspace.occupied {
-            label.add_css_class(state::OCCUPIED);
+            indicator.add_css_class(state::OCCUPIED);
         } else if workspace.urgent {
-            label.add_css_class(state::URGENT);
+            indicator.add_css_class(state::URGENT);
         }
 
         // Set tooltip with workspace info
         let tooltip_text = build_tooltip(workspace);
-        TooltipManager::global().set_styled_tooltip(label, &tooltip_text);
+        TooltipManager::global().set_styled_tooltip(indicator, &tooltip_text);
     }
 }
 
@@ -455,5 +782,190 @@ mod tests {
         assert_eq!(LabelType::from_str("numbers"), LabelType::Numbers);
         assert_eq!(LabelType::from_str("none"), LabelType::None);
         assert_eq!(LabelType::from_str("unknown"), LabelType::Icons); // default
+    }
+
+    #[test]
+    fn test_workspace_config_animate_default() {
+        let entry = make_widget_entry("workspaces", HashMap::new());
+        let config = WorkspacesConfig::from_entry(&entry);
+        assert!(config.animate);
+    }
+
+    #[test]
+    fn test_workspace_config_animate_disabled() {
+        let mut options = HashMap::new();
+        options.insert("animate".to_string(), Value::Boolean(false));
+        let entry = make_widget_entry("workspaces", options);
+        let config = WorkspacesConfig::from_entry(&entry);
+        assert!(!config.animate);
+    }
+
+    // -- compute_target_width tests --
+
+    #[test]
+    fn test_compute_target_width_single_active() {
+        // widget_height=30, 1 active + 0 inactive, gap=4
+        // pill_w = 30, total = 30
+        let total = compute_target_width(30, 1, 0, 4);
+        assert_eq!(total, 30);
+    }
+
+    #[test]
+    fn test_compute_target_width_single_inactive() {
+        // widget_height=30, 0 active + 1 inactive, gap=4
+        // circle_w = ceil(30 * 0.7) = ceil(21.0) = 21, total = 21
+        let total = compute_target_width(30, 0, 1, 4);
+        assert_eq!(total, 21);
+    }
+
+    #[test]
+    fn test_compute_target_width_mixed() {
+        // widget_height=30, 1 active + 2 inactive, gap=4
+        // pill_w = 30, circle_w = 21
+        // indicators_w = 30 + 2*21 = 72, gaps = (3-1)*4 = 8, total = 80
+        let total = compute_target_width(30, 1, 2, 4);
+        assert_eq!(total, 80);
+    }
+
+    #[test]
+    fn test_compute_target_width_multiple_active() {
+        // widget_height=30, 2 active + 1 inactive, gap=4
+        // indicators_w = 2*30 + 21 = 81, gaps = (3-1)*4 = 8, total = 89
+        let total = compute_target_width(30, 2, 1, 4);
+        assert_eq!(total, 89);
+    }
+
+    #[test]
+    fn test_compute_target_width_empty() {
+        let total = compute_target_width(30, 0, 0, 4);
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_compute_target_width_no_gap() {
+        // widget_height=30, 1 active + 2 inactive, gap=0
+        // indicators_w = 30 + 2*21 = 72, gaps = 0, total = 72
+        let total = compute_target_width(30, 1, 2, 0);
+        assert_eq!(total, 72);
+    }
+
+    #[test]
+    fn test_compute_target_width_fractional_rounding() {
+        // widget_height=25: circle_w = ceil(25 * 0.7) = ceil(17.5) = 18
+        // pill_w = ceil(25 * 1.0) = 25
+        // 1 active + 2 inactive, gap=4
+        // indicators_w = 25 + 2*18 = 61, gaps = (3-1)*4 = 8, total = 69
+        let total = compute_target_width(25, 1, 2, 4);
+        assert_eq!(total, 69);
+    }
+
+    // -- compute_left_count tests --
+
+    #[test]
+    fn test_compute_left_count_active_first() {
+        // n=5, active=0 → left=[0], right=[1,2,3,4]
+        assert_eq!(compute_left_count(5, Some(0)), 1);
+    }
+
+    #[test]
+    fn test_compute_left_count_active_middle() {
+        // n=5, active=2 → left=[0,1,2], right=[3,4]
+        assert_eq!(compute_left_count(5, Some(2)), 3);
+    }
+
+    #[test]
+    fn test_compute_left_count_active_second_to_last() {
+        // n=5, active=3 → left=[0,1,2,3], right=[4]
+        assert_eq!(compute_left_count(5, Some(3)), 4);
+    }
+
+    #[test]
+    fn test_compute_left_count_active_last() {
+        // n=5, active=4 → left=[0,1,2,3], right=[4] (right-anchored)
+        assert_eq!(compute_left_count(5, Some(4)), 4);
+    }
+
+    #[test]
+    fn test_compute_left_count_no_active() {
+        // n=5, no active → midpoint split: left=[0,1,2], right=[3,4]
+        assert_eq!(compute_left_count(5, None), 3);
+    }
+
+    #[test]
+    fn test_compute_left_count_no_active_even() {
+        // n=4, no active → midpoint split: left=[0,1], right=[2,3]
+        assert_eq!(compute_left_count(4, None), 2);
+    }
+
+    #[test]
+    fn test_compute_left_count_two_active_first() {
+        // n=2, active=0 → left=[0], right=[1]
+        assert_eq!(compute_left_count(2, Some(0)), 1);
+    }
+
+    #[test]
+    fn test_compute_left_count_two_active_last() {
+        // n=2, active=1 → left=[0], right=[1] (active-is-last rule)
+        assert_eq!(compute_left_count(2, Some(1)), 1);
+    }
+
+    // -- build_tooltip tests --
+
+    fn make_workspace(
+        id: i32,
+        name: &str,
+        active: bool,
+        occupied: bool,
+        urgent: bool,
+        window_count: Option<u32>,
+    ) -> Workspace {
+        Workspace {
+            id,
+            name: name.to_string(),
+            active,
+            occupied,
+            urgent,
+            window_count,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn test_build_tooltip_active_with_windows() {
+        let ws = make_workspace(1, "1", true, true, false, Some(3));
+        assert_eq!(build_tooltip(&ws), "Workspace 1 • Active • 3 windows");
+    }
+
+    #[test]
+    fn test_build_tooltip_active_single_window() {
+        let ws = make_workspace(2, "2", true, true, false, Some(1));
+        assert_eq!(build_tooltip(&ws), "Workspace 2 • Active • 1 window");
+    }
+
+    #[test]
+    fn test_build_tooltip_inactive_empty() {
+        let ws = make_workspace(3, "3", false, false, false, None);
+        assert_eq!(build_tooltip(&ws), "Workspace 3 • Empty");
+    }
+
+    #[test]
+    fn test_build_tooltip_occupied_no_count() {
+        let ws = make_workspace(4, "4", false, true, false, None);
+        assert_eq!(build_tooltip(&ws), "Workspace 4 • Has windows");
+    }
+
+    #[test]
+    fn test_build_tooltip_urgent() {
+        let ws = make_workspace(5, "5", false, true, true, Some(2));
+        assert_eq!(build_tooltip(&ws), "Workspace 5 • Urgent • 2 windows");
+    }
+
+    #[test]
+    fn test_build_tooltip_custom_name() {
+        let ws = make_workspace(1, "browser", true, true, false, Some(5));
+        assert_eq!(
+            build_tooltip(&ws),
+            "Workspace 1: browser • Active • 5 windows"
+        );
     }
 }

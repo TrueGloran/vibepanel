@@ -432,6 +432,9 @@ pub mod widget {
     /// Workspace indicator minimal style (`.workspace-indicator-minimal`).
     pub const WORKSPACE_INDICATOR_MINIMAL: &str = "workspace-indicator-minimal";
 
+    /// Workspace indicator no-animate (`.workspace-no-animate`).
+    pub const WORKSPACE_NO_ANIMATE: &str = "workspace-no-animate";
+
     /// Workspace separator (`.workspace-separator`).
     pub const WORKSPACE_SEPARATOR: &str = "workspace-separator";
 
