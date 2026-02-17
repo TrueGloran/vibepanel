@@ -8,6 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use tracing::trace;
+
 use crate::services::audio::AudioService;
 use crate::services::brightness::BrightnessService;
 use crate::services::callbacks::CallbackId;
@@ -25,7 +27,7 @@ use vibepanel_core::config::OsdConfig;
 use crate::services::audio::AudioSnapshot;
 use crate::services::brightness::BrightnessSnapshot;
 use crate::services::icons::IconsService;
-use crate::services::osd_ipc::{OsdIpcListener, OsdMessage};
+use crate::services::ipc::IpcMessage;
 use crate::services::surfaces::SurfaceStyleManager;
 
 /// Valid OSD positions for anchoring.
@@ -167,7 +169,6 @@ impl OsdWidget {
 /// - Does not take keyboard focus
 /// - Does not reserve screen space (exclusive_zone = 0)
 /// - Auto-hides after a timeout
-/// - Listens for IPC messages from CLI commands
 pub struct OsdOverlay {
     window: gtk4::Window,
     osd_widget: OsdWidget,
@@ -182,9 +183,6 @@ pub struct OsdOverlay {
     audio_baseline_seen: Cell<bool>,
     last_volume: Cell<u32>,
     last_muted: Cell<bool>,
-
-    // IPC listener for CLI commands (kept alive for the lifetime of the overlay).
-    _ipc_listener: RefCell<Option<Rc<RefCell<OsdIpcListener>>>>,
 
     // Callback IDs for deterministic cleanup.
     brightness_callback_id: Cell<Option<CallbackId>>,
@@ -258,14 +256,12 @@ impl OsdOverlay {
             audio_baseline_seen: Cell::new(false),
             last_volume: Cell::new(0),
             last_muted: Cell::new(false),
-            _ipc_listener: RefCell::new(None),
             brightness_callback_id: Cell::new(None),
             audio_callback_id: Cell::new(None),
         });
 
         overlay.connect_brightness();
         overlay.connect_audio();
-        overlay.connect_ipc();
 
         overlay
     }
@@ -499,55 +495,44 @@ impl OsdOverlay {
         self.show_volume(volume, muted);
     }
 
-    // Internal: IPC integration (for CLI commands)
+    // Public: IPC message handling (called by the panel-level IPC listener)
 
-    fn connect_ipc(self: &Rc<Self>) {
-        let listener = match OsdIpcListener::new() {
-            Some(l) => l,
-            None => {
-                debug!("OSD IPC listener not available (non-fatal)");
-                return;
-            }
-        };
+    /// Handle an OSD-relevant IPC message from the panel listener.
+    ///
+    /// Only OSD-visual messages (Volume, VolumeUnavailable, Brightness) are
+    /// handled here. Non-OSD messages (e.g., ToggleInhibitor) are handled
+    /// at the panel level and should not be passed to this method.
+    pub fn handle_ipc_message(self: &Rc<Self>, msg: &IpcMessage) {
+        match msg {
+            IpcMessage::Volume { percent, muted } => {
+                debug!("OSD: received volume {}% muted={}", percent, muted);
+                // Notify AudioService of the external volume request so
+                // behavioral detection can track whether the backend responded.
+                let audio = AudioService::global();
+                audio.note_external_volume_request(*percent);
 
-        let this_weak = Rc::downgrade(self);
-
-        listener.borrow().connect(move |msg| {
-            let Some(this) = this_weak.upgrade() else {
-                return;
-            };
-
-            match msg {
-                OsdMessage::Volume { percent, muted } => {
-                    debug!("OSD IPC: received volume {}% muted={}", percent, muted);
-                    // Notify AudioService of the external volume request so
-                    // behavioral detection can track whether the backend responded.
-                    let audio = AudioService::global();
-                    audio.note_external_volume_request(percent);
-
-                    // Check if control is available before showing normal volume OSD
-                    let snapshot = audio.current();
-                    if snapshot.available && !snapshot.control_available {
-                        // Backend is up but not accepting volume changes
-                        this.show_volume_unavailable();
-                    } else {
-                        this.show_volume(percent, muted);
-                    }
-                }
-                OsdMessage::VolumeUnavailable => {
-                    debug!("OSD IPC: received volume_unavailable");
-                    this.show_volume_unavailable();
-                }
-                OsdMessage::Brightness { percent } => {
-                    debug!("OSD IPC: received brightness {}%", percent);
-                    this.show_brightness(percent);
+                // Check if control is available before showing normal volume OSD
+                let snapshot = audio.current();
+                if snapshot.available && !snapshot.control_available {
+                    // Backend is up but not accepting volume changes
+                    self.show_volume_unavailable();
+                } else {
+                    self.show_volume(*percent, *muted);
                 }
             }
-        });
-
-        // Store the listener to keep it alive.
-        *self._ipc_listener.borrow_mut() = Some(listener);
-        debug!("OSD IPC listener connected");
+            IpcMessage::VolumeUnavailable => {
+                debug!("OSD: received volume_unavailable");
+                self.show_volume_unavailable();
+            }
+            IpcMessage::Brightness { percent } => {
+                debug!("OSD: received brightness {}%", percent);
+                self.show_brightness(*percent);
+            }
+            // Non-OSD messages are handled at the panel level, not here.
+            IpcMessage::ToggleInhibitor => {
+                trace!("OSD: ignoring non-OSD message: {:?}", msg);
+            }
+        }
     }
 }
 
