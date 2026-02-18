@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use gtk4::glib;
 use tracing::{debug, error, warn};
 
-use crate::services::updates::{PackageManager, UpdatesService, UpdatesSnapshot};
+use crate::services::updates::{PackageManager, UpdatesService, UpdatesSnapshot, has_flatpak};
 
 /// Get the appropriate icon name based on snapshot state.
 pub fn icon_for_state(snapshot: &UpdatesSnapshot) -> &'static str {
@@ -191,7 +191,7 @@ pub fn spawn_upgrade_terminal(
         .or_else(detect_terminal)
         .ok_or_else(|| "No terminal emulator found".to_string())?;
 
-    let upgrade_cmd = package_manager.upgrade_command();
+    let upgrade_cmd = build_upgrade_command(package_manager);
 
     // Build the shell command that runs upgrade and waits for user input
     let shell_cmd = format!(
@@ -268,6 +268,25 @@ pub fn spawn_upgrade_terminal(
     }
 }
 
+/// Build the shell command used for update execution.
+///
+/// If Flatpak exists and the primary manager is not Flatpak, append a Flatpak
+/// update pass so one click upgrades both system packages and Flatpaks.
+fn build_upgrade_command(package_manager: PackageManager) -> String {
+    let primary = package_manager.upgrade_command();
+
+    if package_manager != PackageManager::Flatpak && has_flatpak() {
+        // Use `;` rather than `&&` so flatpak updates still run even if the
+        // primary package manager fails
+        format!(
+            "{}; echo ''; echo 'Running Flatpak updates...'; flatpak update",
+            primary
+        )
+    } else {
+        primary.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +311,7 @@ mod tests {
             available: true,
             is_ready: true,
             checking: false,
+            check_status: None,
             error: None,
             update_count: count,
             updates_by_repo: by_repo,
@@ -321,6 +341,7 @@ mod tests {
             available: true,
             is_ready: true,
             checking: false,
+            check_status: None,
             error: None,
             update_count: 0,
             updates_by_repo: HashMap::new(),
@@ -338,6 +359,7 @@ mod tests {
             available: true,
             is_ready: true,
             checking: false,
+            check_status: None,
             error: Some("Network error".to_string()),
             update_count: 0,
             updates_by_repo: HashMap::new(),
@@ -394,5 +416,19 @@ mod tests {
 
         snapshot.error = Some("test".to_string());
         assert_eq!(icon_for_state(&snapshot), "software-update-urgent");
+    }
+
+    #[test]
+    fn test_build_upgrade_command_flatpak_primary() {
+        let cmd = build_upgrade_command(PackageManager::Flatpak);
+        assert_eq!(cmd, "flatpak update");
+    }
+
+    #[test]
+    fn test_build_upgrade_command_non_flatpak_contains_primary() {
+        // NOTE: The exact output depends on whether /usr/bin/flatpak exists on
+        // the test machine. We only verify the primary command prefix.
+        let cmd = build_upgrade_command(PackageManager::Paru);
+        assert!(cmd.starts_with("paru -Syu"));
     }
 }
