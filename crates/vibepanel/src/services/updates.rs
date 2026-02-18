@@ -1,7 +1,7 @@
 //! UpdatesService - shared, event-driven package update state.
 //!
 //! This service provides:
-//! - Auto-detection of package managers (dnf, pacman, paru)
+//! - Auto-detection of package managers (dnf, pacman, paru, flatpak)
 //! - Periodic checking for available updates
 //! - Background thread execution to avoid blocking the UI
 //! - Grouped updates by repository
@@ -9,9 +9,10 @@
 //! Supports:
 //! - Fedora: dnf
 //! - Arch Linux: pacman (official repos), paru (official + AUR)
+//! - Universal: flatpak
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
@@ -37,6 +38,8 @@ pub enum PackageManager {
     Pacman,
     /// Arch Linux's paru (official repos + AUR).
     Paru,
+    /// Flatpak package manager.
+    Flatpak,
 }
 
 impl PackageManager {
@@ -46,6 +49,7 @@ impl PackageManager {
             Self::Dnf => "sudo dnf upgrade --refresh",
             Self::Pacman => "sudo pacman -Syu",
             Self::Paru => "paru -Syu",
+            Self::Flatpak => "flatpak update",
         }
     }
 }
@@ -292,6 +296,7 @@ impl Drop for UpdatesService {
 /// 1. paru (Arch + AUR)
 /// 2. dnf (Fedora)
 /// 3. pacman (Arch official only)
+/// 4. flatpak (cross-distro)
 fn detect_package_manager() -> Option<PackageManager> {
     // Check for paru first (implies Arch + AUR support)
     if Path::new("/usr/bin/paru").exists() {
@@ -308,18 +313,39 @@ fn detect_package_manager() -> Option<PackageManager> {
         return Some(PackageManager::Pacman);
     }
 
+    // Check for flatpak (cross-distro sandboxed apps)
+    if has_flatpak() {
+        return Some(PackageManager::Flatpak);
+    }
+
     None
+}
+
+/// Whether Flatpak is available on the system.
+pub(crate) fn has_flatpak() -> bool {
+    Path::new("/usr/bin/flatpak").exists()
 }
 
 /// Run the update check for the given package manager.
 ///
 /// This runs in a background thread and should not touch any GTK state.
 fn run_update_check(pm: PackageManager) -> CheckResult {
-    match pm {
+    let mut result = match pm {
         PackageManager::Dnf => check_dnf_updates(),
         PackageManager::Pacman => check_pacman_updates(),
         PackageManager::Paru => check_paru_updates(),
+        PackageManager::Flatpak => check_flatpak_updates(),
+    };
+
+    // Append flatpak updates when a different primary manager is detected
+    if pm != PackageManager::Flatpak
+        && has_flatpak()
+        && let Err(e) = append_flatpak_updates(&mut result.updates_by_repo)
+    {
+        debug!("Flatpak update check failed (ignored): {}", e);
     }
+
+    result
 }
 
 /// Check for updates using DNF (Fedora).
@@ -526,6 +552,46 @@ fn check_paru_updates() -> CheckResult {
     }
 }
 
+/// Check for updates using Flatpak.
+fn check_flatpak_updates() -> CheckResult {
+    let mut by_repo = HashMap::new();
+    match append_flatpak_updates(&mut by_repo) {
+        Ok(()) => CheckResult {
+            updates_by_repo: by_repo,
+            error: None,
+        },
+        Err(e) => CheckResult {
+            updates_by_repo: HashMap::new(),
+            error: Some(e),
+        },
+    }
+}
+
+/// Append Flatpak updates under the `flatpak` repo key.
+fn append_flatpak_updates(by_repo: &mut HashMap<String, Vec<UpdateInfo>>) -> Result<(), String> {
+    let output = Command::new("flatpak")
+        .args(["remote-ls", "--updates", "--columns=application"])
+        .output()
+        .map_err(|e| format!("Failed to run flatpak: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "flatpak remote-ls failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let updates = parse_flatpak_updates_output(&stdout);
+    if !updates.is_empty() {
+        by_repo.insert("flatpak".to_string(), updates);
+    }
+
+    Ok(())
+}
+
 /// Parse checkupdates/pacman -Qu output.
 ///
 /// Format: `package-name oldversion -> newversion`
@@ -558,6 +624,24 @@ fn parse_checkupdates_output(output: &str) -> Vec<UpdateInfo> {
     }
 
     updates
+}
+
+/// Parse `flatpak remote-ls --updates --columns=application` output.
+///
+/// Format: one Flatpak application/runtime ID per line.
+/// Duplicates are removed because the same ID can appear for both system and
+/// user installations.
+fn parse_flatpak_updates_output(output: &str) -> Vec<UpdateInfo> {
+    let mut seen = HashSet::new();
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|name| seen.insert(*name))
+        .map(|name| UpdateInfo {
+            name: name.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -632,6 +716,34 @@ firefox 119.0-1 -> 120.0-1
 
         let pacman_result = parse_checkupdates_output("");
         assert!(pacman_result.is_empty());
+
+        let flatpak_result = parse_flatpak_updates_output("");
+        assert!(flatpak_result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_flatpak_updates_output() {
+        let output = r#"
+org.mozilla.firefox
+org.gnome.Calculator
+org.freedesktop.Platform
+"#;
+
+        let result = parse_flatpak_updates_output(output);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].name, "org.mozilla.firefox");
+        assert_eq!(result[2].name, "org.freedesktop.Platform");
+    }
+
+    #[test]
+    fn test_parse_flatpak_updates_output_dedup() {
+        // Same ID can appear for both system and user installations
+        let output = "org.mozilla.firefox\norg.gnome.Calculator\norg.mozilla.firefox\n";
+        let result = parse_flatpak_updates_output(output);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "org.mozilla.firefox");
+        assert_eq!(result[1].name, "org.gnome.Calculator");
     }
 
     #[test]
@@ -642,5 +754,6 @@ firefox 119.0-1 -> 120.0-1
         );
         assert_eq!(PackageManager::Pacman.upgrade_command(), "sudo pacman -Syu");
         assert_eq!(PackageManager::Paru.upgrade_command(), "paru -Syu");
+        assert_eq!(PackageManager::Flatpak.upgrade_command(), "flatpak update");
     }
 }
