@@ -23,7 +23,7 @@ VibePanel is something between a simple status bar and a full desktop shell:
 
 These examples use roughly ~10–35 lines of TOML to get completely different vibes, no CSS required.
 
-<https://github.com/user-attachments/assets/28cc8b6e-a1ec-46a9-acee-15c13ee2bce5>
+<https://github.com/user-attachments/assets/d7ed9674-1c32-436e-af1a-5ece72096816>
 
 *A few example configurations*
 <table align="center">
