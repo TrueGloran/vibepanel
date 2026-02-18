@@ -333,6 +333,9 @@ pub mod qs {
     /// Updates details container (`.qs-updates-details`).
     pub const UPDATES_DETAILS: &str = "qs-updates-details";
 
+    /// Updates header row with refresh button + last-check label (`.qs-updates-header-row`).
+    pub const UPDATES_HEADER_ROW: &str = "qs-updates-header-row";
+
     /// Updates last check label (`.qs-updates-last-check`).
     pub const UPDATES_LAST_CHECK: &str = "qs-updates-last-check";
 

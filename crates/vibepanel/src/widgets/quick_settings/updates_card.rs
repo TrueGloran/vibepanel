@@ -134,14 +134,24 @@ pub struct UpdatesDetailsResult {
 
 /// Build the updates details section with refresh button and update list.
 pub fn build_updates_details(state: &Rc<UpdatesCardState>) -> UpdatesDetailsResult {
-    let container = GtkBox::new(Orientation::Vertical, 4);
+    let container = GtkBox::new(Orientation::Vertical, 0);
     container.add_css_class(qs::UPDATES_DETAILS);
-    container.set_margin_top(4);
 
-    // Top row: refresh button on left, last check on right
+    // Top row: last check on left, refresh button on right (matching wifi/bluetooth scan layout)
     let top_row = GtkBox::new(Orientation::Horizontal, 8);
+    top_row.add_css_class(qs::UPDATES_HEADER_ROW);
 
-    // Refresh button (styled like wifi/bluetooth scan button)
+    // Last check / status label (left side)
+    let last_check_label = Label::new(None);
+    last_check_label.add_css_class(qs::UPDATES_LAST_CHECK);
+    last_check_label.add_css_class(row::QS_SUBTITLE);
+    last_check_label.add_css_class(color::MUTED);
+    last_check_label.set_hexpand(true);
+    last_check_label.set_xalign(0.0);
+    top_row.append(&last_check_label);
+    *state.last_check_label.borrow_mut() = Some(last_check_label);
+
+    // Refresh button (right side, matching wifi/bluetooth scan button position)
     let refresh_btn = ScanButton::with_label("Refresh", || {
         debug!("Updates: refresh button clicked");
         UpdatesService::global().refresh();
@@ -149,16 +159,6 @@ pub fn build_updates_details(state: &Rc<UpdatesCardState>) -> UpdatesDetailsResu
 
     top_row.append(refresh_btn.widget());
     *state.refresh_button.borrow_mut() = Some(refresh_btn);
-
-    // Last check label (right side)
-    let last_check_label = Label::new(None);
-    last_check_label.add_css_class(qs::UPDATES_LAST_CHECK);
-    last_check_label.add_css_class(row::QS_SUBTITLE);
-    last_check_label.add_css_class(color::MUTED);
-    last_check_label.set_hexpand(true);
-    last_check_label.set_xalign(1.0);
-    top_row.append(&last_check_label);
-    *state.last_check_label.borrow_mut() = Some(last_check_label);
 
     container.append(&top_row);
 
@@ -218,9 +218,13 @@ pub fn on_updates_changed(state: &UpdatesCardState, snapshot: &UpdatesSnapshot) 
     // Update refresh button label and animation
     update_refresh_ui(state, snapshot);
 
-    // Update last check label
+    // Update last check label (shows check progress while checking)
     if let Some(label) = state.last_check_label.borrow().as_ref() {
-        let text = format!("Last check: {}", format_last_check(snapshot.last_check));
+        let text = if let Some(ref status) = snapshot.check_status {
+            status.clone()
+        } else {
+            format!("Last check: {}", format_last_check(snapshot.last_check))
+        };
         label.set_label(&text);
     }
 
@@ -256,17 +260,12 @@ fn populate_updates_list(state: &UpdatesCardState, snapshot: &UpdatesSnapshot) {
         return;
     }
 
-    // Handle checking state
-    if snapshot.checking && snapshot.update_count == 0 {
-        let row = create_message_row("Checking for updates...");
-        list_box.append(&row);
-        return;
-    }
-
-    // Handle no updates
+    // Handle no updates (don't show "up to date" while still checking)
     if snapshot.update_count == 0 {
-        let row = create_message_row("System is up to date");
-        list_box.append(&row);
+        if !snapshot.checking {
+            let row = create_message_row("System is up to date");
+            list_box.append(&row);
+        }
         return;
     }
 

@@ -130,6 +130,13 @@ window.quick-settings-window {
     margin-bottom: -4px;
 }
 
+/* Updates header row in expanded details (refresh button + last check) */
+.qs-updates-header-row {
+    padding: 0 0 0 8px;
+    margin-top: 8px;
+    margin-bottom: -4px;
+}
+
 /* Generic disabled state placeholder (used by Bluetooth, Network, etc.) */
 .qs-disabled-state {
     padding: 16px;

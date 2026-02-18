@@ -70,6 +70,8 @@ pub struct UpdatesSnapshot {
     pub is_ready: bool,
     /// Whether a check is currently in progress.
     pub checking: bool,
+    /// Human-readable status during an active check (e.g. "Checking dnf...").
+    pub check_status: Option<String>,
     /// Last error message, if any.
     pub error: Option<String>,
     /// Total number of available updates.
@@ -89,6 +91,7 @@ impl UpdatesSnapshot {
             available: false,
             is_ready: false,
             checking: false,
+            check_status: None,
             error: None,
             update_count: 0,
             updates_by_repo: HashMap::new(),
@@ -184,6 +187,18 @@ impl UpdatesService {
         self.check_updates_async();
     }
 
+    /// Update the human-readable check status and notify listeners.
+    ///
+    /// Called from the main thread (via `glib::idle_add_once`) while a
+    /// background check is in progress.
+    fn set_check_status(&self, status: &str) {
+        let mut snapshot = self.snapshot.borrow_mut();
+        snapshot.check_status = Some(status.to_string());
+        let snapshot_clone = snapshot.clone();
+        drop(snapshot);
+        self.callbacks.notify(&snapshot_clone);
+    }
+
     /// Set the check interval in seconds.
     ///
     /// Takes effect on the next timer cycle.
@@ -242,7 +257,13 @@ impl UpdatesService {
 
         // Spawn background thread
         std::thread::spawn(move || {
-            let result = run_update_check(pm);
+            let report_status = |status: String| {
+                glib::idle_add_once(move || {
+                    UpdatesService::global().set_check_status(&status);
+                });
+            };
+
+            let result = run_update_check(pm, &report_status);
 
             // Send result back to main thread
             glib::idle_add_once(move || {
@@ -257,6 +278,7 @@ impl UpdatesService {
 
         let mut snapshot = self.snapshot.borrow_mut();
         snapshot.checking = false;
+        snapshot.check_status = None;
         snapshot.is_ready = true;
 
         if let Some(err) = result.error {
@@ -329,20 +351,21 @@ pub(crate) fn has_flatpak() -> bool {
 /// Run the update check for the given package manager.
 ///
 /// This runs in a background thread and should not touch any GTK state.
-fn run_update_check(pm: PackageManager) -> CheckResult {
+/// `report_status` is called before each step to update the UI with progress.
+fn run_update_check(pm: PackageManager, report_status: &dyn Fn(String)) -> CheckResult {
     let mut result = match pm {
-        PackageManager::Dnf => check_dnf_updates(),
-        PackageManager::Pacman => check_pacman_updates(),
-        PackageManager::Paru => check_paru_updates(),
-        PackageManager::Flatpak => check_flatpak_updates(),
+        PackageManager::Dnf => check_dnf_updates(report_status),
+        PackageManager::Pacman => check_pacman_updates(report_status),
+        PackageManager::Paru => check_paru_updates(report_status),
+        PackageManager::Flatpak => check_flatpak_updates(report_status),
     };
 
     // Append flatpak updates when a different primary manager is detected
-    if pm != PackageManager::Flatpak
-        && has_flatpak()
-        && let Err(e) = append_flatpak_updates(&mut result.updates_by_repo)
-    {
-        debug!("Flatpak update check failed (ignored): {}", e);
+    if pm != PackageManager::Flatpak && has_flatpak() {
+        report_status("Checking flatpak...".to_string());
+        if let Err(e) = append_flatpak_updates(&mut result.updates_by_repo) {
+            debug!("Flatpak update check failed (ignored): {}", e);
+        }
     }
 
     result
@@ -350,14 +373,40 @@ fn run_update_check(pm: PackageManager) -> CheckResult {
 
 /// Check for updates using DNF (Fedora).
 ///
+/// Split into two phases so the UI can show meaningful progress:
+/// 1. `dnf makecache --refresh` — refreshes repo metadata (slow, network-bound)
+/// 2. `dnf upgrade --assumeno` — checks for available upgrades against fresh cache
+///
 /// Uses `dnf upgrade --assumeno` which performs full dependency resolution,
 /// giving accurate results that match what `dnf upgrade` will actually do.
 /// This avoids false positives from `check-update` when packages from
 /// higher-priority repos (like COPRs) are already installed.
-fn check_dnf_updates() -> CheckResult {
-    let output = Command::new("dnf")
-        .args(["upgrade", "--assumeno", "--refresh"])
-        .output();
+fn check_dnf_updates(report_status: &dyn Fn(String)) -> CheckResult {
+    // Phase 1: Refresh repo metadata (this is the slow, network-bound part)
+    report_status("Refreshing dnf cache...".to_string());
+    match Command::new("dnf")
+        .args(["makecache", "--refresh"])
+        .output()
+    {
+        Ok(output) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return CheckResult {
+                updates_by_repo: HashMap::new(),
+                error: Some(format!("Failed to refresh repos: {}", stderr.trim())),
+            };
+        }
+        Err(e) => {
+            return CheckResult {
+                updates_by_repo: HashMap::new(),
+                error: Some(format!("Failed to run dnf makecache: {}", e)),
+            };
+        }
+        _ => {}
+    }
+
+    // Phase 2: Check for available upgrades against fresh cache
+    report_status("Checking for upgrades...".to_string());
+    let output = Command::new("dnf").args(["upgrade", "--assumeno"]).output();
 
     match output {
         Ok(output) => {
@@ -443,7 +492,9 @@ fn parse_dnf_upgrade_output(output: &str) -> HashMap<String, Vec<UpdateInfo>> {
 }
 
 /// Check for updates using pacman (Arch official repos).
-fn check_pacman_updates() -> CheckResult {
+fn check_pacman_updates(report_status: &dyn Fn(String)) -> CheckResult {
+    report_status("Checking pacman...".to_string());
+
     // Try checkupdates first (from pacman-contrib), fall back to pacman -Qu
     let output = Command::new("checkupdates").output();
 
@@ -480,10 +531,11 @@ fn check_pacman_updates() -> CheckResult {
 }
 
 /// Check for updates using paru (Arch + AUR).
-fn check_paru_updates() -> CheckResult {
+fn check_paru_updates(report_status: &dyn Fn(String)) -> CheckResult {
     let mut by_repo: HashMap<String, Vec<UpdateInfo>> = HashMap::new();
 
     // Check official repos with checkupdates
+    report_status("Checking official repos...".to_string());
     let official_output = Command::new("checkupdates").output();
 
     match official_output {
@@ -522,6 +574,7 @@ fn check_paru_updates() -> CheckResult {
     }
 
     // Check AUR with paru -Qua
+    report_status("Checking AUR...".to_string());
     let aur_output = Command::new("paru").args(["-Qua"]).output();
 
     match aur_output {
@@ -553,7 +606,9 @@ fn check_paru_updates() -> CheckResult {
 }
 
 /// Check for updates using Flatpak.
-fn check_flatpak_updates() -> CheckResult {
+fn check_flatpak_updates(report_status: &dyn Fn(String)) -> CheckResult {
+    report_status("Checking flatpak...".to_string());
+
     let mut by_repo = HashMap::new();
     match append_flatpak_updates(&mut by_repo) {
         Ok(()) => CheckResult {
