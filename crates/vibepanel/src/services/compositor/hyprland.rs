@@ -52,6 +52,7 @@ impl HyprlandBackend {
         let workspaces: Vec<WorkspaceMeta> = (1..=DEFAULT_WORKSPACE_COUNT)
             .map(|i| WorkspaceMeta {
                 id: i,
+                idx: i,
                 name: i.to_string(),
                 output: None, // Hyprland workspaces are global
             })

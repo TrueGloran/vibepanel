@@ -434,17 +434,20 @@ impl WorkspaceContainer {
         }
     }
 
-    /// Freeze the current left-group size for use during removal animations.
-    fn freeze_left_count(&self) -> usize {
+    /// Freeze the left-group size based on where the removed workspace(s)
+    /// were in the old layout. The split is placed at the leftmost removal
+    /// index so that:
+    ///   - indicators to the LEFT of the gap stay left-anchored
+    ///   - indicators to the RIGHT of the gap stay right-anchored
+    ///   - the container width shrinks, closing the gap where the removed
+    ///     workspace was
+    ///
+    /// `leftmost_removed_idx` is the position in the old children list of
+    /// the first workspace being removed.
+    fn freeze_left_count_at(&self, leftmost_removed_idx: usize) -> usize {
         let children = self.imp().children.borrow();
         let n = children.len();
-        let left_count = if n < 2 {
-            n
-        } else {
-            let active_css = crate::styles::widget::ACTIVE;
-            let active_idx = children.iter().position(|c| c.has_css_class(active_css));
-            compute_left_count(n, active_idx)
-        };
+        let left_count = leftmost_removed_idx.min(n);
         self.imp().frozen_left_count.set(Some(left_count));
         left_count
     }
@@ -1172,10 +1175,19 @@ fn update_indicators(
 
                     let pre_removal_width = wsc.compute_children_current_width();
 
-                    // Freeze the two-group split BEFORE removing children so
-                    // e.g. ws2 doesn't jump groups when active changes from
-                    // ws3 to ws1.
-                    let frozen = wsc.freeze_left_count();
+                    // Find the leftmost removed index BEFORE removing children.
+                    // This determines the freeze split: everything to the left
+                    // stays left-anchored, everything to the right stays
+                    // right-anchored, and the gap closes where the removed
+                    // workspace was.
+                    let ids = ids_cell.borrow();
+                    let leftmost_removed_idx = ids
+                        .iter()
+                        .position(|id| !new_ids_set.contains(id))
+                        .unwrap_or(ids.len());
+                    drop(ids);
+
+                    let frozen = wsc.freeze_left_count_at(leftmost_removed_idx);
 
                     {
                         let mut labels = labels_cell.borrow_mut();
@@ -1378,9 +1390,9 @@ fn build_tooltip(workspace: &Workspace) -> String {
     let mut parts = Vec::new();
 
     // Niri can have custom workspace names separate from the index.
-    let id_str = workspace.id.to_string();
-    if workspace.name != id_str {
-        parts.push(format!("Workspace {}: {}", workspace.id, workspace.name));
+    let idx_str = workspace.idx.to_string();
+    if workspace.name != idx_str {
+        parts.push(format!("Workspace {}: {}", workspace.idx, workspace.name));
     } else {
         parts.push(format!("Workspace {}", workspace.name));
     }
@@ -1534,6 +1546,7 @@ mod tests {
     ) -> Workspace {
         Workspace {
             id,
+            idx: id,
             name: name.to_string(),
             active,
             occupied,

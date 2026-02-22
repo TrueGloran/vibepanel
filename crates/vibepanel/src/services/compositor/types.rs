@@ -29,8 +29,14 @@ use std::sync::Arc;
 /// independent of whether it's active or has windows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceMeta {
-    /// Unique identifier (typically 1-based index).
+    /// Stable unique identifier.
+    /// - For Niri: the compositor's internal workspace ID (u64 cast to i32).
+    /// - For Hyprland/MangoWC: same as `idx` (sequential 1-based index).
     pub id: i32,
+    /// Positional display index (1-based, per-output for Niri).
+    /// Used for display labels and ordering; not stable across workspace
+    /// destruction in compositors with dynamic workspaces (e.g. Niri).
+    pub idx: i32,
     /// Display name for the workspace.
     pub name: String,
     /// Output/monitor name this workspace belongs to.
@@ -191,16 +197,19 @@ mod tests {
     fn test_workspace_meta_equality() {
         let ws1 = WorkspaceMeta {
             id: 1,
+            idx: 1,
             name: "1".to_string(),
             output: None,
         };
         let ws2 = WorkspaceMeta {
             id: 1,
+            idx: 1,
             name: "1".to_string(),
             output: None,
         };
         let ws3 = WorkspaceMeta {
             id: 2,
+            idx: 2,
             name: "2".to_string(),
             output: None,
         };

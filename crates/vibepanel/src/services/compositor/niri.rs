@@ -34,8 +34,6 @@ struct SharedState {
     workspace_snapshot: RwLock<WorkspaceSnapshot>,
     focused_window: RwLock<Option<WindowInfo>>,
     workspaces: RwLock<Vec<WorkspaceMeta>>,
-    /// Map from Niri's u64 workspace ID to our 1-based index.
-    id_to_idx: RwLock<HashMap<u64, i32>>,
     /// Map from Niri's u64 workspace ID to output name.
     id_to_output: RwLock<HashMap<u64, String>>,
     windows: RwLock<HashMap<u64, WindowData>>,
@@ -50,7 +48,6 @@ impl Default for SharedState {
             workspace_snapshot: RwLock::new(WorkspaceSnapshot::default()),
             focused_window: RwLock::new(None),
             workspaces: RwLock::new(Vec::new()),
-            id_to_idx: RwLock::new(HashMap::new()),
             id_to_output: RwLock::new(HashMap::new()),
             windows: RwLock::new(HashMap::new()),
             per_output_window: RwLock::new(HashMap::new()),
@@ -137,12 +134,10 @@ impl NiriBackend {
     /// Process workspace list and update internal state.
     fn process_workspaces(shared: &SharedState, workspaces: &[Value]) {
         let mut ws_list = shared.workspaces.write();
-        let mut id_map = shared.id_to_idx.write();
         let mut id_to_output = shared.id_to_output.write();
         let mut snapshot = shared.workspace_snapshot.write();
 
         ws_list.clear();
-        id_map.clear();
         id_to_output.clear();
         snapshot.occupied_workspaces.clear();
         snapshot.urgent_workspaces.clear();
@@ -155,6 +150,8 @@ impl NiriBackend {
                 continue;
             };
             let idx = ws.get("idx").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+            // Use Niri's stable workspace ID for identity tracking.
+            let stable_id = ws_id as i32;
             let name = ws
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -167,21 +164,21 @@ impl NiriBackend {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
-            id_map.insert(ws_id, idx);
             // Store mapping from Niri workspace ID to output name
             if let Some(ref out) = output {
                 id_to_output.insert(ws_id, out.clone());
             }
             ws_list.push(WorkspaceMeta {
-                id: idx,
+                id: stable_id,
+                idx,
                 name,
                 output: output.clone(),
             });
 
             // All workspaces in Niri are occupied (dynamic workspaces)
-            snapshot.occupied_workspaces.insert(idx);
+            snapshot.occupied_workspaces.insert(stable_id);
             // Initialize window count to 0, will be updated from window cache
-            snapshot.window_counts.insert(idx, 0);
+            snapshot.window_counts.insert(stable_id, 0);
 
             let is_focused = ws
                 .get("is_focused")
@@ -193,7 +190,7 @@ impl NiriBackend {
                 .unwrap_or(false);
 
             if is_focused {
-                snapshot.active_workspace.insert(idx);
+                snapshot.active_workspace.insert(stable_id);
             }
 
             if ws
@@ -201,37 +198,36 @@ impl NiriBackend {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
-                snapshot.urgent_workspaces.insert(idx);
+                snapshot.urgent_workspaces.insert(stable_id);
             }
 
             // Build per-output state (Niri workspaces belong to specific outputs)
             if let Some(ref out_name) = output {
                 let per_out = snapshot.per_output.entry(out_name.clone()).or_default();
 
-                per_out.occupied_workspaces.insert(idx);
+                per_out.occupied_workspaces.insert(stable_id);
                 // Window count will be updated from window cache
-                per_out.window_counts.insert(idx, 0);
+                per_out.window_counts.insert(stable_id, 0);
 
                 // is_active means visible on this output, is_focused means globally focused
                 if is_active {
-                    per_out.active_workspace.insert(idx);
+                    per_out.active_workspace.insert(stable_id);
                 }
             }
         }
 
-        // Sort by output then id for consistent ordering
+        // Sort by output then positional index for consistent ordering
         ws_list.sort_by(|a, b| match (&a.output, &b.output) {
-            (Some(oa), Some(ob)) => oa.cmp(ob).then(a.id.cmp(&b.id)),
+            (Some(oa), Some(ob)) => oa.cmp(ob).then(a.idx.cmp(&b.idx)),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.id.cmp(&b.id),
+            (None, None) => a.idx.cmp(&b.idx),
         });
 
         // Update window counts from window cache
         // Must drop all write locks before calling update_window_counts
         drop(snapshot);
         drop(id_to_output);
-        drop(id_map);
         drop(ws_list);
         Self::update_window_counts(shared);
     }
@@ -239,7 +235,6 @@ impl NiriBackend {
     /// Update window counts from the window cache.
     fn update_window_counts(shared: &SharedState) {
         let win_cache = shared.windows.read();
-        let id_map = shared.id_to_idx.read();
         let id_to_output = shared.id_to_output.read();
         let mut snapshot = shared.workspace_snapshot.write();
 
@@ -257,17 +252,17 @@ impl NiriBackend {
 
         // Count windows per workspace
         for win in win_cache.values() {
-            if let Some(ws_niri_id) = win.workspace_id
-                && let Some(&idx) = id_map.get(&ws_niri_id)
-            {
-                // Update global count
-                *snapshot.window_counts.entry(idx).or_insert(0) += 1;
+            if let Some(ws_niri_id) = win.workspace_id {
+                let stable_id = ws_niri_id as i32;
 
-                // Update per-output count using id_to_output (idx is not unique across outputs)
+                // Update global count
+                *snapshot.window_counts.entry(stable_id).or_insert(0) += 1;
+
+                // Update per-output count
                 if let Some(out_name) = id_to_output.get(&ws_niri_id)
                     && let Some(per_out) = snapshot.per_output.get_mut(out_name)
                 {
-                    *per_out.window_counts.entry(idx).or_insert(0) += 1;
+                    *per_out.window_counts.entry(stable_id).or_insert(0) += 1;
                 }
             }
         }
@@ -314,7 +309,6 @@ impl NiriBackend {
     /// Update per-output active window info from window cache and workspace state.
     fn update_per_output_windows(shared: &SharedState) {
         let win_cache = shared.windows.read();
-        let id_map = shared.id_to_idx.read();
         let id_to_output = shared.id_to_output.read();
         let snapshot = shared.workspace_snapshot.read();
         let mut per_output = shared.per_output_window.write();
@@ -324,8 +318,11 @@ impl NiriBackend {
             // Find active workspace's niri ID for this output
             let active_ws_id = id_to_output.iter().find_map(|(&ws_id, out)| {
                 if out == out_name {
-                    let idx = id_map.get(&ws_id)?;
-                    per_out.active_workspace.contains(idx).then_some(ws_id)
+                    let stable_id = ws_id as i32;
+                    per_out
+                        .active_workspace
+                        .contains(&stable_id)
+                        .then_some(ws_id)
                 } else {
                     None
                 }
@@ -349,7 +346,7 @@ impl NiriBackend {
                 .map(|win| WindowInfo {
                     title: win.title.clone(),
                     app_id: win.app_id.clone(),
-                    workspace_id: active_ws_id.and_then(|id| id_map.get(&id).copied()),
+                    workspace_id: active_ws_id.map(|id| id as i32),
                     output: Some(out_name.clone()),
                 })
                 .unwrap_or_else(|| WindowInfo {
@@ -364,7 +361,6 @@ impl NiriBackend {
     /// Update focused window info from window cache.
     fn update_focused_window_from_cache(shared: &SharedState) -> bool {
         let win_cache = shared.windows.read();
-        let id_map = shared.id_to_idx.read();
         let id_to_output = shared.id_to_output.read();
 
         let mut new_focused: Option<WindowInfo> = None;
@@ -374,10 +370,8 @@ impl NiriBackend {
                 continue;
             }
 
-            let workspace_idx = win
-                .workspace_id
-                .and_then(|ws_id| id_map.get(&ws_id).copied());
-            // Look up the output directly from Niri's workspace ID (not the idx which is per-output)
+            let workspace_id = win.workspace_id.map(|ws_id| ws_id as i32);
+            // Look up the output directly from Niri's workspace ID
             let output = win
                 .workspace_id
                 .and_then(|ws_id| id_to_output.get(&ws_id).cloned());
@@ -385,7 +379,7 @@ impl NiriBackend {
             new_focused = Some(WindowInfo {
                 title: win.title.clone(),
                 app_id: win.app_id.clone(),
-                workspace_id: workspace_idx,
+                workspace_id,
                 output,
             });
             break;
@@ -487,37 +481,33 @@ impl NiriBackend {
                 .unwrap_or(false);
 
             if let Some(ws_id) = ws_niri_id {
-                let id_map = shared.id_to_idx.read();
+                let stable_id = ws_id as i32;
                 let id_to_output = shared.id_to_output.read();
+                let output = id_to_output.get(&ws_id).cloned();
+                drop(id_to_output);
 
-                if let Some(&idx) = id_map.get(&ws_id) {
-                    let output = id_to_output.get(&ws_id).cloned();
-                    drop(id_to_output);
-                    drop(id_map);
+                let mut snapshot = shared.workspace_snapshot.write();
 
-                    let mut snapshot = shared.workspace_snapshot.write();
-
-                    if is_focused && !snapshot.active_workspace.contains(&idx) {
-                        snapshot.active_workspace.clear();
-                        snapshot.active_workspace.insert(idx);
-                        workspace_changed = true;
-                    }
-
-                    if let Some(ref out_name) = output
-                        && let Some(per_out) = snapshot.per_output.get_mut(out_name)
-                        && !per_out.active_workspace.contains(&idx)
-                    {
-                        per_out.active_workspace.clear();
-                        per_out.active_workspace.insert(idx);
-                        workspace_changed = true;
-                    }
-
-                    drop(snapshot);
-
-                    // Workspace switched - update per-output windows
-                    Self::update_per_output_windows(shared);
-                    window_changed = true;
+                if is_focused && !snapshot.active_workspace.contains(&stable_id) {
+                    snapshot.active_workspace.clear();
+                    snapshot.active_workspace.insert(stable_id);
+                    workspace_changed = true;
                 }
+
+                if let Some(ref out_name) = output
+                    && let Some(per_out) = snapshot.per_output.get_mut(out_name)
+                    && !per_out.active_workspace.contains(&stable_id)
+                {
+                    per_out.active_workspace.clear();
+                    per_out.active_workspace.insert(stable_id);
+                    workspace_changed = true;
+                }
+
+                drop(snapshot);
+
+                // Workspace switched - update per-output windows
+                Self::update_per_output_windows(shared);
+                window_changed = true;
             }
         } else if let Some(urgency_changed) = event.get("WorkspaceUrgencyChanged") {
             if let Some(ws_id) = urgency_changed.get("id").and_then(|v| v.as_u64()) {
@@ -526,14 +516,12 @@ impl NiriBackend {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
-                let id_map = shared.id_to_idx.read();
-                if let Some(&idx) = id_map.get(&ws_id) {
-                    let mut snapshot = shared.workspace_snapshot.write();
-                    if is_urgent {
-                        workspace_changed = snapshot.urgent_workspaces.insert(idx);
-                    } else {
-                        workspace_changed = snapshot.urgent_workspaces.remove(&idx);
-                    }
+                let stable_id = ws_id as i32;
+                let mut snapshot = shared.workspace_snapshot.write();
+                if is_urgent {
+                    workspace_changed = snapshot.urgent_workspaces.insert(stable_id);
+                } else {
+                    workspace_changed = snapshot.urgent_workspaces.remove(&stable_id);
                 }
             }
         } else if let Some(windows_changed) = event.get("WindowsChanged") {
@@ -546,12 +534,10 @@ impl NiriBackend {
                 Self::update_single_window(shared, window);
 
                 if let Some(ws_id) = window.get("workspace_id").and_then(|v| v.as_u64()) {
-                    let id_map = shared.id_to_idx.read();
-                    if let Some(&idx) = id_map.get(&ws_id) {
-                        let mut snapshot = shared.workspace_snapshot.write();
-                        if snapshot.occupied_workspaces.insert(idx) {
-                            workspace_changed = true;
-                        }
+                    let stable_id = ws_id as i32;
+                    let mut snapshot = shared.workspace_snapshot.write();
+                    if snapshot.occupied_workspaces.insert(stable_id) {
+                        workspace_changed = true;
                     }
                 }
 
@@ -586,19 +572,17 @@ impl NiriBackend {
 
             if let Some(ws_id) = ws_niri_id {
                 let id_to_output = shared.id_to_output.read();
-                let id_map = shared.id_to_idx.read();
 
                 if let Some(output) = id_to_output.get(&ws_id).cloned() {
-                    let workspace_idx = id_map.get(&ws_id).copied();
+                    let workspace_id = Some(ws_id as i32);
                     drop(id_to_output);
-                    drop(id_map);
 
                     let win_info = if let Some(win_id) = active_win_id {
                         let win_cache = shared.windows.read();
                         win_cache.get(&win_id).map(|win| WindowInfo {
                             title: win.title.clone(),
                             app_id: win.app_id.clone(),
-                            workspace_id: workspace_idx,
+                            workspace_id,
                             output: Some(output.clone()),
                         })
                     } else {
@@ -821,6 +805,7 @@ impl CompositorBackend for NiriBackend {
             (1..=10)
                 .map(|i| WorkspaceMeta {
                     id: i,
+                    idx: i,
                     name: i.to_string(),
                     output: None,
                 })
@@ -848,11 +833,12 @@ impl CompositorBackend for NiriBackend {
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
+        // Use stable workspace ID (not positional index) for reliable switching.
         let request = serde_json::json!({
             "Action": {
                 "FocusWorkspace": {
                     "reference": {
-                        "Index": workspace_id
+                        "Id": workspace_id
                     }
                 }
             }
