@@ -22,6 +22,7 @@ use gtk4::glib::{self, SourceId};
 use tracing::{debug, info, warn};
 
 use super::callbacks::{CallbackId, Callbacks};
+use super::network::NetworkService;
 
 /// Default check interval in seconds (1 hour).
 const DEFAULT_CHECK_INTERVAL: u64 = 3600;
@@ -184,6 +185,15 @@ impl UpdatesService {
         if !self.snapshot.borrow().available {
             return;
         }
+        let net = NetworkService::global().snapshot();
+        if !net.connected() && !net.wired_connected() && !net.mobile_active() {
+            let mut snapshot = self.snapshot.borrow_mut();
+            snapshot.error = Some("Offline — check skipped".to_string());
+            let clone = snapshot.clone();
+            drop(snapshot);
+            self.callbacks.notify(&clone);
+            return;
+        }
         self.check_updates_async();
     }
 
@@ -234,6 +244,13 @@ impl UpdatesService {
         // Prevent concurrent checks
         if self.check_in_progress.get() {
             debug!("UpdatesService: check already in progress, skipping");
+            return;
+        }
+
+        // Skip if offline
+        let net = NetworkService::global().snapshot();
+        if !net.connected() && !net.wired_connected() && !net.mobile_active() {
+            debug!("UpdatesService: offline, skipping update check");
             return;
         }
 
