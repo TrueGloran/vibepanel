@@ -73,6 +73,8 @@ impl NmService {
 
                     // Initial state update
                     this.update_state();
+                    // Also fetch the AP list; update_state() alone won't for disconnected users.
+                    this.refresh_networks_async();
                 }
             },
         );

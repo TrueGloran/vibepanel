@@ -133,19 +133,9 @@ impl NetworkSnapshot {
         }
     }
 
-    /// Whether Wi-Fi is in any connecting/scanning state that warrants a spinner.
-    ///
-    /// Covers three cases:
-    ///   1. User-initiated connection (`connecting_ssid` is set)
-    ///   2. NM device is in a connecting state (PREPARE through SECONDARIES)
-    ///   3. Wi-Fi enabled, not connected, not wired, initial scan in progress
+    /// Whether Wi-Fi is in a connecting state that warrants a spinner.
     pub fn wifi_connecting(&self) -> bool {
-        self.connecting_ssid().is_some()
-            || self.wifi_device_connecting()
-            || (self.wifi_enabled().unwrap_or(false)
-                && !self.connected()
-                && !self.wired_connected()
-                && (self.scanning() || !self.is_ready()))
+        self.connecting_ssid().is_some() || self.wifi_device_connecting()
     }
 
     pub fn connection_state(&self) -> NetworkConnectionState {
@@ -200,14 +190,6 @@ impl NetworkSnapshot {
         match self {
             Self::NetworkManager(inner) => inner.wifi.has_device,
             Self::Iwd(inner) => inner.available,
-        }
-    }
-
-    pub fn is_ready(&self) -> bool {
-        match self {
-            Self::NetworkManager(inner) => inner.wifi.is_ready,
-            // Mirrors NM's is_ready for consistent UI behavior.
-            Self::Iwd(inner) => inner.initial_scan_complete,
         }
     }
 
