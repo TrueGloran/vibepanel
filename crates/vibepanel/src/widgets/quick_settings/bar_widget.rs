@@ -388,7 +388,7 @@ impl QuickSettingsWidget {
                         "Connecting...".to_string()
                     } else if snapshot.wifi_enabled() == Some(false) {
                         "Wi-Fi Off".to_string()
-                    } else if snapshot.scanning() || !snapshot.is_ready() {
+                    } else if snapshot.scanning() {
                         "Wi-Fi: Scanning...".to_string()
                     } else {
                         "Disconnected".to_string()

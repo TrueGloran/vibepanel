@@ -435,11 +435,15 @@ pub mod widget {
     /// Workspace indicator minimal style (`.workspace-indicator-minimal`).
     pub const WORKSPACE_INDICATOR_MINIMAL: &str = "workspace-indicator-minimal";
 
-    /// Workspace indicator no-animate (`.workspace-no-animate`).
-    pub const WORKSPACE_NO_ANIMATE: &str = "workspace-no-animate";
+    /// Workspace indicator grow-in: forces zero width (`.workspace-grow-in`).
+    /// Registered at transient CSS priority (above user CSS) to ensure
+    /// user style.css cannot accidentally defeat the min-width: 0 reset.
+    pub const WORKSPACE_GROW_IN: &str = "workspace-grow-in";
 
-    /// Workspace indicator collapsed for enter animation (`.workspace-indicator-collapsed`).
-    pub const WORKSPACE_INDICATOR_COLLAPSED: &str = "workspace-indicator-collapsed";
+    /// Workspace indicator grow-in: suppresses CSS transitions
+    /// (`.workspace-grow-in-notrans`). Removed one frame before
+    /// `WORKSPACE_GROW_IN` so the `min-width` transition can fire.
+    pub const WORKSPACE_GROW_IN_NOTRANS: &str = "workspace-grow-in-notrans";
 
     /// Workspace separator (`.workspace-separator`).
     pub const WORKSPACE_SEPARATOR: &str = "workspace-separator";

@@ -108,6 +108,7 @@ sectioned-bar.bar {{
     border-radius: calc(var(--radius-pill) * 1.2);
     color: var(--color-foreground-faint);
     transition: min-width 200ms linear, background-color 200ms ease;
+    /* Duration must match INDICATOR_ANIM_DURATION_US in workspaces.rs */
 }}
 
 /* Workspace indicator hover state - clickable indicators */
@@ -125,14 +126,8 @@ sectioned-bar.bar {{
     min-width: calc(var(--widget-height) * {active_mult});
 }}
 
-.workspace-indicator.workspace-no-animate {{
-    transition: none;
-}}
-
-/* Collapsed state for enter animations — forces zero width so CSS transition grows it in */
-.workspace-indicator.workspace-indicator-collapsed {{
-    min-width: 0;
-}}
+/* Grow-in: forces zero width + no transition so container animation handles it.
+   Loaded at USER+200 priority by load_transient_css() so user CSS can't defeat it. */
 
 "#
     )

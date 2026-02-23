@@ -19,8 +19,11 @@ use super::compositor::{CompositorManager, WorkspaceMeta, WorkspaceSnapshot};
 /// Combines static metadata with dynamic state for convenient widget rendering.
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    /// Unique workspace ID.
+    /// Stable unique workspace ID (for identity, switching, and HashMap keys).
     pub id: i32,
+    /// Positional display index (1-based, per-output for Niri).
+    /// Used for display labels, ordering, and tooltip text.
+    pub idx: i32,
     /// Display name for the workspace.
     pub name: String,
     /// Whether this is the currently active workspace.
@@ -43,6 +46,7 @@ impl Workspace {
     fn from_meta(meta: &WorkspaceMeta, snapshot: &WorkspaceSnapshot) -> Self {
         Self {
             id: meta.id,
+            idx: meta.idx,
             name: meta.name.clone(),
             active: snapshot.active_workspace.contains(&meta.id),
             occupied: snapshot.occupied_workspaces.contains(&meta.id),
@@ -81,6 +85,7 @@ impl Workspace {
 
         Self {
             id: meta.id,
+            idx: meta.idx,
             name: meta.name.clone(),
             active,
             occupied,
@@ -287,6 +292,7 @@ mod tests {
     fn make_meta(id: i32) -> WorkspaceMeta {
         WorkspaceMeta {
             id,
+            idx: id,
             name: id.to_string(),
             output: None,
         }

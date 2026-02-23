@@ -25,7 +25,8 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use gtk4::glib;
 use tracing::{debug, info};
@@ -217,11 +218,36 @@ impl CompositorManager {
             advanced_config.compositor,
         );
 
-        // Create thread-safe callbacks that use idle_add_once to schedule on main loop
-        let on_workspace_update: WorkspaceCallback = Arc::new(move |snapshot| {
-            glib::idle_add_once(move || {
-                CompositorManager::global().handle_workspace_update(snapshot);
-            });
+        // Create thread-safe callbacks that use idle_add_once to schedule on main loop.
+        //
+        // Workspace events are coalesced: rapid-fire events from compositors like
+        // Niri (which sends WorkspaceActivated then WorkspacesChanged as two separate
+        // events when a workspace is destroyed) are merged into a single idle callback.
+        // Without this, the first idle would see an inconsistent hybrid state: Event 1's
+        // snapshot (old workspace list, new active) combined with Event 2's already-updated
+        // workspace list read via list_workspaces(), causing the wrong indicator to be removed.
+        let pending_ws_snapshot: Arc<Mutex<Option<WorkspaceSnapshot>>> = Arc::new(Mutex::new(None));
+        let ws_idle_scheduled: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+        let on_workspace_update: WorkspaceCallback = Arc::new({
+            let pending = Arc::clone(&pending_ws_snapshot);
+            let scheduled = Arc::clone(&ws_idle_scheduled);
+            move |snapshot| {
+                // Always store the latest snapshot (overwrites any pending one)
+                *pending.lock().unwrap() = Some(snapshot);
+
+                // Only schedule one idle per batch of rapid-fire events
+                if !scheduled.swap(true, Ordering::SeqCst) {
+                    let pending = Arc::clone(&pending);
+                    let scheduled = Arc::clone(&scheduled);
+                    glib::idle_add_once(move || {
+                        scheduled.store(false, Ordering::SeqCst);
+                        if let Some(snapshot) = pending.lock().unwrap().take() {
+                            CompositorManager::global().handle_workspace_update(snapshot);
+                        }
+                    });
+                }
+            }
         });
 
         let on_window_update: WindowCallback = Arc::new(move |window_info| {

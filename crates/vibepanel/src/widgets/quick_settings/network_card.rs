@@ -1063,11 +1063,6 @@ pub fn populate_wifi_list(
         return;
     }
 
-    if !snapshot.is_ready() {
-        add_placeholder_row(list_box, "Scanning for networks...");
-        return;
-    }
-
     if snapshot.networks().is_empty() {
         add_placeholder_row(list_box, "No networks found");
         return;

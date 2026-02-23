@@ -785,6 +785,7 @@ impl CompositorBackend for MangoBackend {
         (1..=count as i32)
             .map(|id| WorkspaceMeta {
                 id,
+                idx: id,
                 name: id.to_string(),
                 output: None, // MangoWC/DWL tags are global
             })
