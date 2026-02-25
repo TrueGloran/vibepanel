@@ -711,7 +711,7 @@ fn show_vpn_auth_dialog(state: &Rc<VpnCardState>, request: &VpnAuthRequest) {
         revealer.set_reveal_child(true);
     }
     if let Some(arrow) = state.base.arrow.borrow().as_ref() {
-        arrow.set_icon("keyboard_arrow_up");
+        arrow.set_icon("pan-up-symbolic");
     }
 
     // Repopulate list to position the auth box under the correct connection
