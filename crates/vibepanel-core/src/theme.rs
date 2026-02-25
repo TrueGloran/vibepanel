@@ -281,6 +281,7 @@ pub struct ThemePalette {
     widget_radius_percent: u32,
     bar_size: u32,
     bar_padding: u32,
+    bar_is_bottom: bool,
 }
 
 impl ThemePalette {
@@ -303,6 +304,13 @@ impl ThemePalette {
                 "color-mix(in srgb, @accent_color 20%, transparent)".to_string(),
             ),
             _ => (self.accent_primary.clone(), self.accent_subtle.clone()),
+        };
+
+        let edge_pad = self.bar_padding;
+        let center_pad = if self.bar_opacity > 0.0 {
+            self.bar_padding
+        } else {
+            0
         };
 
         format!(
@@ -457,14 +465,18 @@ impl ThemePalette {
             radius_pill = self.radius_pill,
             radius_factor = (self.widget_radius_percent as f64 / 50.0).min(1.0),
             bar_height = self.sizes.bar_height,
-            // Visual padding always applies (widgets offset from edge),
-            // but exclusive zone only includes it when bar is visible (handled in bar.rs)
-            bar_padding_y = self.bar_padding,
-            // Bottom padding is 0 in islands mode (opacity=0) to keep exclusive zone tight
-            bar_padding_y_bottom = if self.bar_opacity > 0.0 {
-                self.bar_padding
+            // Screen-edge padding always applies; screen-center padding is 0
+            // in islands mode (opacity=0) to keep the exclusive zone tight.
+            // When bar is bottom, CSS top/bottom roles swap.
+            bar_padding_y = if self.bar_is_bottom {
+                center_pad
             } else {
-                0
+                edge_pad
+            },
+            bar_padding_y_bottom = if self.bar_is_bottom {
+                edge_pad
+            } else {
+                center_pad
             },
             widget_height = self.sizes.widget_height,
             widget_padding_x = self.sizes.widget_padding_x,
@@ -661,6 +673,7 @@ impl ThemePalette {
         // Bar size
         self.bar_size = config.bar.size;
         self.bar_padding = config.bar.padding;
+        self.bar_is_bottom = config.bar.is_bottom();
     }
 
     fn compute_derived_values(&mut self) {
@@ -896,6 +909,7 @@ impl Default for ThemePalette {
             widget_radius_percent: 40,
             bar_size: 32,
             bar_padding: 4,
+            bar_is_bottom: false,
         }
     }
 }
