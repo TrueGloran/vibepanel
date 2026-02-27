@@ -32,6 +32,8 @@ const SCROLL_GAP: f64 = 50.0;
 struct MarqueeState {
     /// Whether currently scrolling.
     scrolling: bool,
+    /// Whether the animation is paused (offset is preserved, unlike stop).
+    paused: bool,
     /// Current scroll offset in pixels.
     offset: f64,
     /// Total scroll distance needed (text_width + gap).
@@ -52,6 +54,7 @@ impl Default for MarqueeState {
     fn default() -> Self {
         Self {
             scrolling: false,
+            paused: false,
             offset: 0.0,
             scroll_distance: 0.0,
             text_width: 0.0,
@@ -378,6 +381,16 @@ impl MarqueeLabel {
         s.scrolling = false;
         s.offset = 0.0;
     }
+
+    /// Pause or resume the scrolling animation.
+    ///
+    /// When paused, the scroll position is preserved (unlike `stop_animation`
+    /// which resets to the beginning). Resuming continues from the same offset.
+    pub fn set_paused(&self, paused: bool) {
+        let state = self.container.state();
+        let mut s = state.borrow_mut();
+        s.paused = paused;
+    }
 }
 
 impl Default for MarqueeLabel {
@@ -461,6 +474,11 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
             if !s.scrolling {
                 s.timer_id = None;
                 return glib::ControlFlow::Break;
+            }
+
+            // When paused, keep the timer alive but freeze the scroll position
+            if s.paused {
+                return glib::ControlFlow::Continue;
             }
 
             s.offset += s.scroll_speed;

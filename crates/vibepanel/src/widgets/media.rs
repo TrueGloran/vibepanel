@@ -933,6 +933,11 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         }
     }
 
+    let marquee_paused = snapshot.playback_status != PlaybackStatus::Playing;
+    for marquee in ctx.text_labels.iter() {
+        marquee.set_paused(marquee_paused);
+    }
+
     if let Some(icon) = ctx.status_icon {
         let icon_name = match snapshot.playback_status {
             PlaybackStatus::Playing => media::ICON_PAUSE,

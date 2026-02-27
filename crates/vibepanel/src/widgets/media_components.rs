@@ -82,6 +82,9 @@ impl MediaViewController {
             &self.is_seeking,
             snapshot,
         );
+
+        self.title_label
+            .set_paused(snapshot.playback_status != PlaybackStatus::Playing);
     }
 }
 

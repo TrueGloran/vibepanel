@@ -39,8 +39,9 @@ const MATERIAL_FONT_FAMILY: &str = "Material Symbols Rounded";
 /// Relative path to the Material Symbols font file from the project root.
 const MATERIAL_FONT_FILE: &str = "assets/fonts/MaterialSymbolsRounded.ttf";
 
-/// Embedded font data - included at compile time for standalone binary distribution.
-/// This allows the binary to work without requiring external font files.
+/// Material Symbols font, embedded for standalone binary distribution.
+/// Subset to only include icons used in [`material_symbol_name`].
+/// After adding or removing icon mappings, run `./scripts/subset-font.sh`.
 const EMBEDDED_FONT_DATA: &[u8] =
     include_bytes!("../../../../assets/fonts/MaterialSymbolsRounded.ttf");
 
@@ -97,6 +98,9 @@ fn register_font_with_pango(font_path: &std::path::Path) -> bool {
 }
 
 /// Maps logical icon names to Material Symbols glyph names.
+///
+/// `scripts/subset-font.sh` extracts glyph names from match arms in this
+/// function. Keep the structure as flat `"key" => "value"` arms.
 ///
 /// Material Symbols uses ligatures: setting the label text to "battery_full"
 /// renders the battery_full glyph. This mapping converts our canonical names
@@ -290,8 +294,13 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         // Loading / progress spinner
         "process-working-symbolic" => "progress_activity",
 
-        // Fallback: pass through unchanged (allows Material ligature names directly)
-        _ => icon_name,
+        // Fallback: pass through unchanged (warns since unmapped names won't render in subset font)
+        _ => {
+            warn!(
+                "No Material Symbol mapping for '{icon_name}'; icon may not render (font is subset)"
+            );
+            icon_name
+        }
     }
 }
 
@@ -2142,7 +2151,7 @@ mod tests {
 
     #[test]
     fn test_material_symbol_fallback() {
-        // Unknown names should pass through unchanged
+        // Unknown names pass through unchanged
         assert_eq!(material_symbol_name("unknown-icon"), "unknown-icon");
         assert_eq!(material_symbol_name("wifi"), "wifi");
     }
