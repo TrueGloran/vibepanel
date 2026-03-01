@@ -556,16 +556,27 @@ impl Default for WidgetsConfig {
 impl WidgetsConfig {
     /// Check if a widget is disabled via its `[widgets.<name>]` config.
     pub fn is_disabled(&self, name: &str) -> bool {
-        self.widget_configs
-            .get(name)
+        self.get_options(name)
             .map(|opts| opts.disabled)
             .unwrap_or(false)
     }
 
     /// Get widget options for a given widget name.
     /// Returns None if no `[widgets.<name>]` section exists.
+    ///
+    /// Normalizes hyphens to underscores so CSS class names (e.g. "quick-settings")
+    /// resolve to TOML config keys (e.g. "quick_settings").
     pub fn get_options(&self, name: &str) -> Option<&WidgetOptions> {
-        self.widget_configs.get(name)
+        // Fast path: try exact match first (most names have no hyphens)
+        if let Some(opts) = self.widget_configs.get(name) {
+            return Some(opts);
+        }
+        // Fallback: normalize hyphens to underscores for CSS-class lookups
+        if name.contains('-') {
+            let normalized = name.replace('-', "_");
+            return self.widget_configs.get(&normalized);
+        }
+        None
     }
 
     /// Parse inline argument from widget name.
@@ -830,6 +841,14 @@ pub struct WidgetOptions {
     /// If invalid or not set, uses the theme's default widget background.
     #[serde(default)]
     pub background_color: Option<String>,
+
+    /// Shell command to execute on right-click. Runs via `sh -c`.
+    #[serde(default)]
+    pub on_click_right: Option<String>,
+
+    /// Shell command to execute on middle-click. Runs via `sh -c`.
+    #[serde(default)]
+    pub on_click_middle: Option<String>,
 
     /// Widget-specific options (format, show_icon, etc.).
     #[serde(flatten)]
@@ -1584,6 +1603,28 @@ mod tests {
     }
 
     #[test]
+    fn test_get_options_normalizes_hyphens() {
+        let toml = r#"
+            [widgets]
+            left = ["quick_settings"]
+
+            [widgets.quick_settings]
+            on_click_right = "notify-send hello"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+
+        // Exact match (underscore key)
+        assert!(config.widgets.get_options("quick_settings").is_some());
+
+        // Hyphenated CSS class name resolves to underscore config key
+        assert!(config.widgets.get_options("quick-settings").is_some());
+
+        // Non-existent widget still returns None
+        assert!(config.widgets.get_options("nonexistent").is_none());
+    }
+
+    #[test]
     fn test_widget_count_helper() {
         let single = WidgetPlacement::Single("clock".to_string());
         assert_eq!(single.widget_count(), 1);
@@ -1816,5 +1857,64 @@ mod tests {
 
         assert_eq!(entry.name, "spacer");
         assert!(!entry.options.contains_key("width"));
+    }
+
+    #[test]
+    fn test_widget_options_click_handlers_parsed() {
+        let toml_str = r#"
+            on_click_right = "notify-send hello"
+            on_click_middle = "xdg-open https://example.com"
+            format = "%H:%M"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(opts.on_click_right, Some("notify-send hello".to_string()));
+        assert_eq!(
+            opts.on_click_middle,
+            Some("xdg-open https://example.com".to_string())
+        );
+        // Widget-specific options end up in the HashMap
+        assert_eq!(
+            opts.options.get("format"),
+            Some(&toml::Value::String("%H:%M".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_widget_options_click_handlers_not_in_options_map() {
+        let toml_str = r#"
+            on_click_right = "notify-send hello"
+            on_click_middle = "xdg-open https://example.com"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        // Click handler fields should NOT leak into the options HashMap
+        assert!(!opts.options.contains_key("on_click_right"));
+        assert!(!opts.options.contains_key("on_click_middle"));
+    }
+
+    #[test]
+    fn test_widget_options_click_handlers_default_to_none() {
+        let toml_str = r#"
+            format = "%H:%M"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(opts.on_click_right.is_none());
+        assert!(opts.on_click_middle.is_none());
+    }
+
+    #[test]
+    fn test_widget_options_click_handlers_not_in_widget_entry() {
+        // Verify click handlers don't leak into WidgetEntry.options
+        let opts = WidgetOptions {
+            on_click_right: Some("notify-send hello".to_string()),
+            on_click_middle: Some("xdg-open https://example.com".to_string()),
+            ..Default::default()
+        };
+
+        let entry = WidgetEntry::with_options("clock", &opts);
+        assert!(!entry.options.contains_key("on_click_right"));
+        assert!(!entry.options.contains_key("on_click_middle"));
     }
 }

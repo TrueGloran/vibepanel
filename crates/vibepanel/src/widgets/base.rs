@@ -4,8 +4,9 @@
 //! common CSS classes and helpers for labels, icons, and tooltips.
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, Popover, PositionType};
+use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, Popover, PositionType, gdk};
 use std::cell::{Cell, RefCell};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 use crate::popover_tracker::{PopoverId, PopoverTracker};
@@ -216,6 +217,27 @@ impl Dismissible for MenuHandle {
     }
 }
 
+/// Spawn a shell command, reaping the child process in a background thread.
+fn spawn_click_command(cmd: &str) {
+    match Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            // Reap the child in a background thread to avoid zombie processes
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => {
+            tracing::warn!("Failed to spawn click command '{}': {}", cmd, e);
+        }
+    }
+}
+
 /// Shared base widget container.
 ///
 /// Each widget owns a `BaseWidget` instance and exposes the underlying
@@ -272,7 +294,17 @@ impl BaseWidget {
 
         let menu: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
 
+        let (on_click_right, on_click_middle) =
+            ConfigManager::global().get_click_handlers(&widget_name);
+
+        let has_click_handler = on_click_right.is_some() || on_click_middle.is_some();
+        if has_click_handler {
+            container.add_css_class(state::CLICKABLE);
+        }
+
         let gesture_click = GestureClick::new();
+        // Receive all mouse buttons so we can handle right-click and middle-click
+        gesture_click.set_button(0);
         {
             let menu_for_cb = menu.clone();
             // Use connect_released for immediate response without double-click detection delay
@@ -293,42 +325,58 @@ impl BaseWidget {
                     let mut current: Option<gtk4::Widget> = Some(target);
                     while let Some(w) = current {
                         if w.downcast_ref::<gtk4::Button>().is_some() {
-                            debug!("BaseWidget click: target is a Button, skipping popover toggle");
+                            debug!("BaseWidget click: target is a Button, skipping");
                             return;
                         }
                         current = w.parent();
                     }
                 }
 
+                let button = gesture.current_button();
+
                 // Process every click regardless of n_press count
                 // (we don't use double-click, so treat them all as single clicks)
-                if gesture.current_button() == 1 {
-                    // Check if our own menu is visible before dismissing
-                    let my_menu_was_visible = menu_for_cb
-                        .borrow()
-                        .as_ref()
-                        .map(|m| m.is_visible())
-                        .unwrap_or(false);
+                match button {
+                    gdk::BUTTON_PRIMARY => {
+                        let my_menu_was_visible = menu_for_cb
+                            .borrow()
+                            .as_ref()
+                            .map(|m| m.is_visible())
+                            .unwrap_or(false);
 
-                    // Cancel any pending or visible tooltips to prevent them from
-                    // appearing after the click
-                    TooltipManager::global().cancel_and_hide();
+                        // Cancel any pending or visible tooltips to prevent them from
+                        // appearing after the click
+                        TooltipManager::global().cancel_and_hide();
 
-                    // Dismiss any active popup (enables seamless transitions)
-                    PopoverTracker::global().dismiss_active();
+                        // Dismiss any active popup (enables seamless transitions)
+                        PopoverTracker::global().dismiss_active();
 
-                    if let Some(ref menu) = *menu_for_cb.borrow() {
-                        // If our menu was already open, we just closed it - don't re-open
-                        // If it wasn't open, open it now
-                        if !my_menu_was_visible {
-                            debug!("Opening menu from BaseWidget click");
-                            menu.show();
+                        if let Some(ref menu) = *menu_for_cb.borrow() {
+                            // If our menu was already open, we just closed it - don't re-open
+                            // If it wasn't open, open it now
+                            if !my_menu_was_visible {
+                                debug!("Opening menu from BaseWidget click");
+                                menu.show();
+                            } else {
+                                debug!("Closed own menu from BaseWidget click");
+                            }
                         } else {
-                            debug!("Closed own menu from BaseWidget click");
+                            debug!("BaseWidget click: no menu registered");
                         }
-                    } else {
-                        debug!("BaseWidget click: no menu registered");
                     }
+                    gdk::BUTTON_MIDDLE => {
+                        if let Some(ref cmd) = on_click_middle {
+                            debug!("BaseWidget middle-click: sh -c {}", cmd);
+                            spawn_click_command(cmd);
+                        }
+                    }
+                    gdk::BUTTON_SECONDARY => {
+                        if let Some(ref cmd) = on_click_right {
+                            debug!("BaseWidget right-click: sh -c {}", cmd);
+                            spawn_click_command(cmd);
+                        }
+                    }
+                    _ => {}
                 }
             });
         }

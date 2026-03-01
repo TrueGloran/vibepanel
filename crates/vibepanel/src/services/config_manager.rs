@@ -201,6 +201,18 @@ impl ConfigManager {
             .and_then(|opts| opts.options.get(option_name).cloned())
     }
 
+    /// Get click handler commands for a widget.
+    ///
+    /// Returns `(on_click_right, on_click_middle)` from `[widgets.<name>]`.
+    pub fn get_click_handlers(&self, widget_name: &str) -> (Option<String>, Option<String>) {
+        let config = self.config.borrow();
+        config
+            .widgets
+            .get_options(widget_name)
+            .map(|opts| (opts.on_click_right.clone(), opts.on_click_middle.clone()))
+            .unwrap_or((None, None))
+    }
+
     /// Register a callback to be called when theme/style configuration changes.
     ///
     /// This is called for changes like border radius, colors, opacity etc. that
@@ -584,8 +596,8 @@ fn widget_names(config: &Config) -> Vec<String> {
     // Also include per-widget configs for comparison
     for (name, opts) in &config.widgets.widget_configs {
         names.push(format!(
-            "config:{}:disabled={},{:?}",
-            name, opts.disabled, opts.options
+            "config:{}:disabled={},click_r={:?},click_m={:?},{:?}",
+            name, opts.disabled, opts.on_click_right, opts.on_click_middle, opts.options
         ));
     }
 
