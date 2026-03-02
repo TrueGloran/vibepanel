@@ -565,36 +565,65 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
         //
         // We connect to both `items_changed` and `notify::n-items` because some
         // Wayland compositors/GTK4 versions don't reliably emit `items_changed`.
+        //
+        // Both handlers share a debounce timer: on each signal we hide bars
+        // immediately (to avoid wrong-monitor rendering) and schedule
+        // reconfiguration after 300ms. This gives the compositor time to fully
+        // register new outputs in its IPC before show_if commands query it.
+        let debounce_source: std::rc::Rc<std::cell::Cell<Option<gtk4::glib::SourceId>>> =
+            std::rc::Rc::new(std::cell::Cell::new(None));
         {
             let config_for_hotplug = config_for_activate.clone();
             let display_for_hotplug = display.clone();
+            let debounce = debounce_source.clone();
             display
                 .monitors()
                 .connect_items_changed(move |_monitors, _pos, _removed, _added| {
                     info!("Monitor configuration changed (items_changed), syncing...");
-                    // Hide all bars immediately to prevent them from appearing
-                    // on the wrong monitor during compositor surface reassignment.
                     BarManager::global().hide_all();
-                    bar_manager::sync_monitors_when_ready(
-                        &display_for_hotplug,
-                        &config_for_hotplug,
-                    );
+                    // Cancel any pending debounce from a previous signal
+                    if let Some(source) = debounce.take() {
+                        source.remove();
+                    }
+                    let display = display_for_hotplug.clone();
+                    let config = config_for_hotplug.clone();
+                    let debounce_clear = debounce.clone();
+                    debounce.set(Some(gtk4::glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(300),
+                        move || {
+                            // Clear stale SourceId — one-shot timers auto-remove
+                            // from the main loop, so the id is invalid after firing.
+                            debounce_clear.take();
+                            bar_manager::sync_monitors_when_ready(&display, &config);
+                        },
+                    )));
                 });
         }
         {
             let config_for_hotplug = config_for_activate.clone();
             let display_for_hotplug = display.clone();
+            let debounce = debounce_source;
             display
                 .monitors()
                 .connect_notify_local(Some("n-items"), move |_monitors, _| {
                     info!("Monitor count changed (notify::n-items), syncing...");
-                    // Hide all bars immediately to prevent them from appearing
-                    // on the wrong monitor during compositor surface reassignment.
                     BarManager::global().hide_all();
-                    bar_manager::sync_monitors_when_ready(
-                        &display_for_hotplug,
-                        &config_for_hotplug,
-                    );
+                    // Cancel any pending debounce from a previous signal
+                    if let Some(source) = debounce.take() {
+                        source.remove();
+                    }
+                    let display = display_for_hotplug.clone();
+                    let config = config_for_hotplug.clone();
+                    let debounce_clear = debounce.clone();
+                    debounce.set(Some(gtk4::glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(300),
+                        move || {
+                            // Clear stale SourceId — one-shot timers auto-remove
+                            // from the main loop, so the id is invalid after firing.
+                            debounce_clear.take();
+                            bar_manager::sync_monitors_when_ready(&display, &config);
+                        },
+                    )));
                 });
         }
 

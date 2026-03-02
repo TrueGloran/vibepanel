@@ -344,7 +344,7 @@ pub fn sync_monitors_when_ready(display: &gtk4::gdk::Display, config: &vibepanel
         // All monitors are ready, sync immediately
         info!("All monitors ready, syncing bars...");
         let manager = BarManager::global();
-        manager.sync_monitors(display, config);
+        manager.reconfigure_all(display, config);
         manager.show_all();
     } else {
         // Wait for pending monitors to become ready
@@ -393,7 +393,7 @@ pub fn sync_monitors_when_ready(display: &gtk4::gdk::Display, config: &vibepanel
                                 drop(pending); // Release borrow before calling sync
                                 info!("All monitors ready, syncing bars...");
                                 let manager = BarManager::global();
-                                manager.sync_monitors(&display, &config);
+                                manager.reconfigure_all(&display, &config);
                                 manager.show_all();
 
                                 // Disconnect all signal handlers to avoid reference cycles

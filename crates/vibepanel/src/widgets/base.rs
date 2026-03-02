@@ -8,6 +8,7 @@ use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, Popover, Posi
 use std::cell::{Cell, RefCell};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::config_manager::ConfigManager;
@@ -18,6 +19,9 @@ use crate::widgets::layer_shell_popover::{Dismissible, LayerShellPopover};
 use gtk4::gio;
 use gtk4::glib;
 use tracing::{debug, info, warn};
+
+/// Timeout for `show_if` commands in seconds.
+const SHOW_IF_TIMEOUT_SECS: u64 = 5;
 
 /// Configure a GTK popover with standard settings.
 ///
@@ -398,36 +402,106 @@ impl BaseWidget {
         }
     }
 
-    /// Set up periodic `show_if` polling if configured.
+    /// Set up async `show_if` evaluation if configured.
+    ///
+    /// Widget starts hidden and the first check runs asynchronously in the
+    /// background. When the result arrives, visibility is updated. If
+    /// `show_if_interval` is set (and > 0), a periodic timer continues
+    /// re-evaluating after the first check. Commands that exceed
+    /// `SHOW_IF_TIMEOUT_SECS` are killed and treated as "hide".
     fn setup_show_if_timer(widget_name: &str, container: &GtkBox) -> Option<glib::SourceId> {
         let (show_if, interval) = ConfigManager::global().get_show_if(widget_name);
 
         let cmd = show_if?;
-        let interval = interval?;
 
-        // Sync to avoid wrong-state flash before first paint; expected to be fast.
-        let (initial_visible, stderr) = Self::run_show_if_command(&cmd);
-        container.set_visible(initial_visible);
-        debug!(
-            widget = widget_name,
-            visible = initial_visible,
-            stderr = %stderr.trim(),
-            "show_if initial check"
-        );
+        // Start hidden; async evaluation will show the widget if appropriate.
+        container.set_visible(false);
 
-        let prev_visible = Rc::new(Cell::new(initial_visible));
-        let container = container.clone();
+        let has_interval = interval.filter(|&i| i > 0).is_some();
+        let prev_visible = Rc::new(Cell::new(false));
+        let container_clone = container.clone();
         let name = widget_name.to_string();
+
+        // Run initial check asynchronously
+        {
+            let cmd = cmd.clone();
+            let container = container_clone.clone();
+            let name = name.clone();
+            let prev_visible = prev_visible.clone();
+
+            glib::spawn_future_local(async move {
+                let cmd_for_retry = cmd.clone();
+                let result =
+                    gio::spawn_blocking(move || Self::run_show_if_command_with_timeout(&cmd)).await;
+
+                let (visible, stderr) = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(widget = %name, error = ?e, "show_if spawn_blocking failed");
+                        (false, String::new())
+                    }
+                };
+
+                container.set_visible(visible);
+                debug!(
+                    widget = %name,
+                    visible,
+                    stderr = %stderr.trim(),
+                    "show_if initial check"
+                );
+                prev_visible.set(visible);
+
+                // If hidden and no periodic interval, schedule a single retry
+                // after 500ms. This handles race conditions where the data source
+                // (e.g., compositor IPC) isn't fully ready when bars are recreated
+                // on monitor hotplug. The retry is one-directional: it can only
+                // transition hidden → visible.
+                if !visible && !has_interval {
+                    let container = container.clone();
+                    let name = name.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                        glib::spawn_future_local(async move {
+                            let result = gio::spawn_blocking(move || {
+                                Self::run_show_if_command_with_timeout(&cmd_for_retry)
+                            })
+                            .await;
+
+                            let (visible, _stderr) = match result {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(
+                                        widget = %name,
+                                        error = ?e,
+                                        "show_if retry spawn_blocking failed"
+                                    );
+                                    (false, String::new())
+                                }
+                            };
+
+                            if visible {
+                                container.set_visible(true);
+                                debug!(widget = %name, "show_if retry: now visible");
+                            }
+                        });
+                    });
+                }
+            });
+        }
+
+        // If an interval is configured, start a periodic timer for subsequent checks
+        let interval = interval.filter(|&i| i > 0)?;
 
         let source_id =
             glib::timeout_add_seconds_local(interval.min(u32::MAX as u64) as u32, move || {
                 let cmd = cmd.clone();
-                let container = container.clone();
+                let container = container_clone.clone();
                 let name = name.clone();
                 let prev_visible = prev_visible.clone();
 
                 glib::spawn_future_local(async move {
-                    let result = gio::spawn_blocking(move || Self::run_show_if_command(&cmd)).await;
+                    let result =
+                        gio::spawn_blocking(move || Self::run_show_if_command_with_timeout(&cmd))
+                            .await;
 
                     let (visible, stderr) = match result {
                         Ok(v) => v,
@@ -455,19 +529,56 @@ impl BaseWidget {
         Some(source_id)
     }
 
-    /// Run a `show_if` shell command synchronously.
+    /// Run a `show_if` shell command synchronously with a timeout.
     /// Returns `(visible, stderr)` where visible = exit 0.
-    fn run_show_if_command(cmd: &str) -> (bool, String) {
-        Command::new("sh")
+    /// Commands exceeding `SHOW_IF_TIMEOUT_SECS` are killed and treated as hidden.
+    pub(super) fn run_show_if_command_with_timeout(cmd: &str) -> (bool, String) {
+        let mut child = match Command::new("sh")
             .args(["-c", cmd])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .output()
-            .map(|o| {
-                let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
-                (o.status.success(), stderr)
-            })
-            .unwrap_or((false, String::new()))
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => return (false, String::new()),
+        };
+
+        let pid = child.id() as libc::pid_t;
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        std::thread::spawn(move || {
+            if rx
+                .recv_timeout(Duration::from_secs(SHOW_IF_TIMEOUT_SECS))
+                .is_err()
+            {
+                // Timeout expired — kill the child.
+                // SAFETY: Sending SIGKILL to a process. If the process already
+                // exited and was reaped, kill() returns ESRCH which is harmless.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        });
+
+        let status = child.wait();
+
+        // Cancel the watchdog (no-op if it already fired).
+        let _ = tx.send(());
+
+        match status {
+            Ok(s) => {
+                use std::os::unix::process::ExitStatusExt;
+                if !s.success() && s.signal() == Some(libc::SIGKILL) {
+                    warn!(
+                        cmd,
+                        "show_if command timed out after {SHOW_IF_TIMEOUT_SECS}s"
+                    );
+                    return (false, String::new());
+                }
+                (s.success(), String::new())
+            }
+            Err(_) => (false, String::new()),
+        }
     }
 
     /// Get the root GTK container for this widget.
