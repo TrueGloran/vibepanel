@@ -313,6 +313,15 @@ impl Config {
             }
         }
 
+        for (name, opts) in &self.widgets.widget_configs {
+            if opts.show_if_interval.is_some() && opts.show_if.is_none() {
+                warnings.push(format!(
+                    "widgets.{}: show_if_interval has no effect without show_if",
+                    name
+                ));
+            }
+        }
+
         warnings
     }
 
@@ -561,6 +570,62 @@ impl WidgetsConfig {
             .unwrap_or(false)
     }
 
+    /// Static `show_if` gate; skipped when `show_if_interval` is set (BaseWidget polls instead).
+    fn excluded_by_show_if(&self, name: &str) -> bool {
+        if self.has_show_if_interval(name) {
+            return false;
+        }
+        self.should_hide_by_show_if(name)
+    }
+
+    /// Returns true if `show_if` is set and the command exits non-zero or fails.
+    fn should_hide_by_show_if(&self, name: &str) -> bool {
+        let cmd = match self
+            .get_options(name)
+            .and_then(|opts| opts.show_if.as_deref())
+        {
+            Some(cmd) => cmd,
+            None => return false,
+        };
+
+        match std::process::Command::new("sh")
+            .args(["-c", cmd])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) => {
+                let show = output.status.success();
+                if !show {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::debug!(
+                        widget = name,
+                        cmd,
+                        exit_code = output.status.code(),
+                        stderr = %stderr.trim(),
+                        "show_if command returned non-zero, hiding widget"
+                    );
+                }
+                !show
+            }
+            Err(err) => {
+                tracing::warn!(
+                    widget = name,
+                    cmd,
+                    error = %err,
+                    "show_if command failed to execute, hiding widget"
+                );
+                true
+            }
+        }
+    }
+
+    fn has_show_if_interval(&self, name: &str) -> bool {
+        self.get_options(name)
+            .and_then(|opts| opts.show_if_interval)
+            .is_some_and(|i| i > 0)
+    }
+
     /// Get widget options for a given widget name.
     /// Returns None if no `[widgets.<name>]` section exists.
     ///
@@ -601,7 +666,7 @@ impl WidgetsConfig {
     }
 
     /// Resolve a single widget name to a WidgetEntry, applying options from config.
-    /// Returns None if the widget is disabled.
+    /// Returns None if the widget is disabled or hidden by `show_if`.
     ///
     /// Supports inline spacer width syntax like "spacer:50".
     /// This is intentionally special-cased: the inline value is parsed and injected
@@ -610,6 +675,10 @@ impl WidgetsConfig {
         let (base_name, inline_arg) = Self::parse_inline_arg(name);
 
         if self.is_disabled(base_name) {
+            return None;
+        }
+
+        if self.excluded_by_show_if(base_name) {
             return None;
         }
 
@@ -690,11 +759,16 @@ impl WidgetsConfig {
     /// Returns `false` for:
     /// - Non-spacer widgets
     /// - Disabled spacers
+    /// - Spacers hidden by `show_if` (without `show_if_interval`)
     /// - Spacers with fixed width (via inline arg like `"spacer:50"` or TOML `width` option)
     fn is_flexible_spacer(&self, name: &str) -> bool {
         let (base_name, inline_arg) = Self::parse_inline_arg(name);
 
         if base_name != "spacer" || self.is_disabled(base_name) {
+            return false;
+        }
+
+        if self.excluded_by_show_if(base_name) {
             return false;
         }
 
@@ -849,6 +923,18 @@ pub struct WidgetOptions {
     /// Shell command to execute on middle-click. Runs via `sh -c`.
     #[serde(default)]
     pub on_click_middle: Option<String>,
+
+    /// Shell command that controls widget visibility. Runs via `sh -c`.
+    /// Exit 0 = show, non-zero or failure = hide. Unset = always show.
+    #[serde(default)]
+    pub show_if: Option<String>,
+
+    /// Interval in seconds to re-evaluate `show_if`. Requires `show_if` to be set.
+    /// If unset (or zero), `show_if` is only checked once at startup.
+    /// When set, the widget is always created and its visibility is toggled
+    /// periodically based on the `show_if` command's exit status.
+    #[serde(default)]
+    pub show_if_interval: Option<u64>,
 
     /// Widget-specific options (format, show_icon, etc.).
     #[serde(flatten)]
@@ -1916,5 +2002,418 @@ mod tests {
         let entry = WidgetEntry::with_options("clock", &opts);
         assert!(!entry.options.contains_key("on_click_right"));
         assert!(!entry.options.contains_key("on_click_middle"));
+    }
+
+    #[test]
+    fn test_show_if_parsed_on_widget_options() {
+        let toml_str = r#"
+            show_if = "command -v foo"
+            format = "%H:%M"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(opts.show_if, Some("command -v foo".to_string()));
+    }
+
+    #[test]
+    fn test_show_if_defaults_to_none() {
+        let toml_str = r#"
+            format = "%H:%M"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(opts.show_if.is_none());
+    }
+
+    #[test]
+    fn test_show_if_not_in_options_map() {
+        let toml_str = r#"
+            show_if = "command -v foo"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(!opts.options.contains_key("show_if"));
+    }
+
+    #[test]
+    fn test_show_if_not_in_widget_entry() {
+        let opts = WidgetOptions {
+            show_if: Some("true".to_string()),
+            ..Default::default()
+        };
+
+        let entry = WidgetEntry::with_options("clock", &opts);
+        assert!(!entry.options.contains_key("show_if"));
+    }
+
+    #[test]
+    fn test_show_if_true_command_shows_widget() {
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("true".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("clock");
+        assert!(entry.is_some());
+    }
+
+    #[test]
+    fn test_show_if_false_command_hides_widget() {
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("false".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("clock");
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_show_if_failed_command_hides_widget() {
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("/nonexistent/binary/that/does/not/exist".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("clock");
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_show_if_disabled_takes_precedence() {
+        // disabled = true should short-circuit before show_if is evaluated
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                disabled: true,
+                show_if: Some("true".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("clock");
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_show_if_no_config_section_shows_widget() {
+        // Widget without a [widgets.<name>] section should always show
+        let config = WidgetsConfig::default();
+
+        assert!(!config.should_hide_by_show_if("clock"));
+    }
+
+    #[test]
+    fn test_show_if_in_group_filters_one_widget() {
+        let toml = r#"
+            [widgets]
+            right = [
+                { group = ["clock", "battery"] },
+            ]
+
+            [widgets.battery]
+            show_if = "false"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+
+        let resolved = config.widgets.resolved_right();
+        assert_eq!(resolved.len(), 1);
+
+        match &resolved[0] {
+            WidgetOrGroup::Group { group } => {
+                assert_eq!(group.len(), 1);
+                assert_eq!(group[0].name, "clock");
+            }
+            WidgetOrGroup::Single(_) => panic!("expected group"),
+        }
+    }
+
+    #[test]
+    fn test_section_has_expander_show_if_false_spacer() {
+        // Spacer with show_if = "false" should NOT count as expander
+        let section = vec![
+            WidgetPlacement::Single("workspaces".to_string()),
+            WidgetPlacement::Single("spacer".to_string()),
+        ];
+
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "spacer".to_string(),
+            WidgetOptions {
+                show_if: Some("false".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(!config.section_has_expander(&section));
+    }
+
+    // --- Phase 2: show_if_interval tests ---
+
+    #[test]
+    fn test_show_if_interval_parsed_on_widget_options() {
+        let toml_str = r#"
+            show_if = "command -v foo"
+            show_if_interval = 30
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(opts.show_if_interval, Some(30));
+    }
+
+    #[test]
+    fn test_show_if_interval_defaults_to_none() {
+        let toml_str = r#"
+            show_if = "true"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(opts.show_if_interval.is_none());
+    }
+
+    #[test]
+    fn test_show_if_interval_not_in_options_map() {
+        let toml_str = r#"
+            show_if = "true"
+            show_if_interval = 10
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(!opts.options.contains_key("show_if_interval"));
+    }
+
+    #[test]
+    fn test_show_if_interval_not_in_widget_entry() {
+        let opts = WidgetOptions {
+            show_if: Some("true".to_string()),
+            show_if_interval: Some(5),
+            ..Default::default()
+        };
+
+        let entry = WidgetEntry::with_options("clock", &opts);
+        assert!(!entry.options.contains_key("show_if_interval"));
+    }
+
+    #[test]
+    fn test_show_if_with_interval_skips_static_gate() {
+        // show_if = "false" + show_if_interval: widget is still created
+        // (BaseWidget handles periodic visibility instead of static gate)
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("false".to_string()),
+                show_if_interval: Some(10),
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("clock");
+        assert!(entry.is_some());
+    }
+
+    #[test]
+    fn test_show_if_without_interval_still_filters() {
+        // Phase 1 behavior unchanged: show_if = "false" without interval hides widget
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("false".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("clock");
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_show_if_interval_zero_treated_as_no_interval() {
+        // show_if_interval = 0 means "no interval" — Phase 1 static gate applies
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("false".to_string()),
+                show_if_interval: Some(0),
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("clock");
+        assert!(entry.is_none());
+    }
+
+    #[test]
+    fn test_has_show_if_interval_true() {
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("true".to_string()),
+                show_if_interval: Some(10),
+                ..Default::default()
+            },
+        );
+
+        assert!(config.has_show_if_interval("clock"));
+    }
+
+    #[test]
+    fn test_has_show_if_interval_false_when_none() {
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("true".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(!config.has_show_if_interval("clock"));
+    }
+
+    #[test]
+    fn test_has_show_if_interval_false_when_zero() {
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("true".to_string()),
+                show_if_interval: Some(0),
+                ..Default::default()
+            },
+        );
+
+        assert!(!config.has_show_if_interval("clock"));
+    }
+
+    #[test]
+    fn test_has_show_if_interval_false_when_no_config() {
+        let config = WidgetsConfig::default();
+        assert!(!config.has_show_if_interval("clock"));
+    }
+
+    #[test]
+    fn test_is_flexible_spacer_with_show_if_interval() {
+        // Spacer with show_if = "false" + interval: not excluded by static gate
+        // (BaseWidget handles visibility), so it's still a flexible spacer
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "spacer".to_string(),
+            WidgetOptions {
+                show_if: Some("false".to_string()),
+                show_if_interval: Some(10),
+                ..Default::default()
+            },
+        );
+
+        assert!(config.is_flexible_spacer("spacer"));
+    }
+
+    #[test]
+    fn test_section_has_expander_spacer_with_show_if_interval() {
+        // Spacer with show_if = "false" + interval should still count as expander
+        // (static gate is skipped when interval is set)
+        let section = vec![
+            WidgetPlacement::Single("workspaces".to_string()),
+            WidgetPlacement::Single("spacer".to_string()),
+        ];
+
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "spacer".to_string(),
+            WidgetOptions {
+                show_if: Some("false".to_string()),
+                show_if_interval: Some(10),
+                ..Default::default()
+            },
+        );
+
+        assert!(config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_show_if_interval_in_group_skips_static_gate() {
+        // Widget in group with show_if = "false" + interval: widget is NOT filtered out
+        let toml = r#"
+            [widgets]
+            right = [
+                { group = ["clock", "battery"] },
+            ]
+
+            [widgets.battery]
+            show_if = "false"
+            show_if_interval = 5
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+
+        let resolved = config.widgets.resolved_right();
+        assert_eq!(resolved.len(), 1);
+
+        match &resolved[0] {
+            WidgetOrGroup::Group { group } => {
+                // Both clock and battery should be present (interval skips static gate)
+                assert_eq!(group.len(), 2);
+            }
+            WidgetOrGroup::Single(_) => panic!("expected group"),
+        }
+    }
+
+    #[test]
+    fn test_warning_show_if_interval_without_show_if() {
+        let toml = r#"
+            [widgets]
+            right = ["clock"]
+
+            [widgets.clock]
+            show_if_interval = 30
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let warnings = config.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("show_if_interval") && w.contains("clock")),
+            "expected warning about show_if_interval without show_if, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_no_warning_show_if_interval_with_show_if() {
+        let toml = r#"
+            [widgets]
+            right = ["clock"]
+
+            [widgets.clock]
+            show_if = "true"
+            show_if_interval = 30
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let warnings = config.warnings();
+        assert!(
+            !warnings.iter().any(|w| w.contains("show_if_interval")),
+            "unexpected show_if_interval warning when show_if is set: {:?}",
+            warnings
+        );
     }
 }

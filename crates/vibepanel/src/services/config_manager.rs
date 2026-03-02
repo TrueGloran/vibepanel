@@ -213,6 +213,22 @@ impl ConfigManager {
             .unwrap_or((None, None))
     }
 
+    /// Get `show_if` command and interval for a widget.
+    ///
+    /// Returns `(show_if_command, show_if_interval)` from `[widgets.<name>]`.
+    /// An interval of `0` is normalized to `None` (treated as no interval).
+    pub fn get_show_if(&self, widget_name: &str) -> (Option<String>, Option<u64>) {
+        let config = self.config.borrow();
+        config
+            .widgets
+            .get_options(widget_name)
+            .map(|opts| {
+                let interval = opts.show_if_interval.filter(|&i| i > 0);
+                (opts.show_if.clone(), interval)
+            })
+            .unwrap_or((None, None))
+    }
+
     /// Register a callback to be called when theme/style configuration changes.
     ///
     /// This is called for changes like border radius, colors, opacity etc. that
@@ -596,8 +612,9 @@ fn widget_names(config: &Config) -> Vec<String> {
     // Also include per-widget configs for comparison
     for (name, opts) in &config.widgets.widget_configs {
         names.push(format!(
-            "config:{}:disabled={},click_r={:?},click_m={:?},{:?}",
-            name, opts.disabled, opts.on_click_right, opts.on_click_middle, opts.options
+            "config:{}:disabled={},click_r={:?},click_m={:?},show_if={:?},show_if_interval={:?},{:?}",
+            name, opts.disabled, opts.on_click_right, opts.on_click_middle,
+            opts.show_if, opts.show_if_interval, opts.options
         ));
     }
 
@@ -654,5 +671,39 @@ mod tests {
         let names = widget_names(&config);
         assert!(names.iter().any(|n| n == "left:workspaces"));
         assert!(names.iter().any(|n| n == "right:clock"));
+    }
+
+    #[test]
+    fn test_widget_names_includes_show_if_fields() {
+        use vibepanel_core::config::{WidgetOptions, WidgetPlacement};
+
+        let mut config = Config::default();
+        config
+            .widgets
+            .right
+            .push(WidgetPlacement::Single("clock".to_string()));
+
+        let names_before = widget_names(&config);
+
+        // Adding show_if should change the fingerprint
+        config.widgets.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                show_if: Some("true".to_string()),
+                ..Default::default()
+            },
+        );
+        let names_with_show_if = widget_names(&config);
+        assert_ne!(names_before, names_with_show_if);
+
+        // Changing show_if_interval should also change the fingerprint
+        config
+            .widgets
+            .widget_configs
+            .get_mut("clock")
+            .unwrap()
+            .show_if_interval = Some(30);
+        let names_with_interval = widget_names(&config);
+        assert_ne!(names_with_show_if, names_with_interval);
     }
 }

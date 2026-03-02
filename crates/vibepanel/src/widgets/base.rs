@@ -15,7 +15,9 @@ use crate::services::icons::{IconHandle, IconsService};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, state, surface};
 use crate::widgets::layer_shell_popover::{Dismissible, LayerShellPopover};
-use tracing::debug;
+use gtk4::gio;
+use gtk4::glib;
+use tracing::{debug, info, warn};
 
 /// Configure a GTK popover with standard settings.
 ///
@@ -254,6 +256,7 @@ pub struct BaseWidget {
     /// Widget name for CSS class-based styling of popovers (e.g., "clock")
     widget_name: String,
     _gesture_click: GestureClick,
+    _show_if_timer: Option<glib::SourceId>,
 }
 
 impl BaseWidget {
@@ -383,13 +386,88 @@ impl BaseWidget {
 
         container.add_controller(gesture_click.clone());
 
+        let show_if_timer = Self::setup_show_if_timer(&widget_name, &container);
+
         Self {
             container,
             content,
             menu,
             widget_name,
             _gesture_click: gesture_click,
+            _show_if_timer: show_if_timer,
         }
+    }
+
+    /// Set up periodic `show_if` polling if configured.
+    fn setup_show_if_timer(widget_name: &str, container: &GtkBox) -> Option<glib::SourceId> {
+        let (show_if, interval) = ConfigManager::global().get_show_if(widget_name);
+
+        let cmd = show_if?;
+        let interval = interval?;
+
+        // Sync to avoid wrong-state flash before first paint; expected to be fast.
+        let (initial_visible, stderr) = Self::run_show_if_command(&cmd);
+        container.set_visible(initial_visible);
+        debug!(
+            widget = widget_name,
+            visible = initial_visible,
+            stderr = %stderr.trim(),
+            "show_if initial check"
+        );
+
+        let prev_visible = Rc::new(Cell::new(initial_visible));
+        let container = container.clone();
+        let name = widget_name.to_string();
+
+        let source_id =
+            glib::timeout_add_seconds_local(interval.min(u32::MAX as u64) as u32, move || {
+                let cmd = cmd.clone();
+                let container = container.clone();
+                let name = name.clone();
+                let prev_visible = prev_visible.clone();
+
+                glib::spawn_future_local(async move {
+                    let result = gio::spawn_blocking(move || Self::run_show_if_command(&cmd)).await;
+
+                    let (visible, stderr) = match result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(widget = %name, error = ?e, "show_if spawn_blocking failed");
+                            (false, String::new())
+                        }
+                    };
+
+                    if visible != prev_visible.get() {
+                        container.set_visible(visible);
+                        info!(
+                            widget = %name,
+                            visible,
+                            stderr = %stderr.trim(),
+                            "show_if visibility changed"
+                        );
+                        prev_visible.set(visible);
+                    }
+                });
+
+                glib::ControlFlow::Continue
+            });
+
+        Some(source_id)
+    }
+
+    /// Run a `show_if` shell command synchronously.
+    /// Returns `(visible, stderr)` where visible = exit 0.
+    fn run_show_if_command(cmd: &str) -> (bool, String) {
+        Command::new("sh")
+            .args(["-c", cmd])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .output()
+            .map(|o| {
+                let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+                (o.status.success(), stderr)
+            })
+            .unwrap_or((false, String::new()))
     }
 
     /// Get the root GTK container for this widget.
@@ -469,5 +547,13 @@ impl BaseWidget {
         let handle = MenuHandle::new(self.widget_name.clone(), builder, self.container.clone());
         *self.menu.borrow_mut() = Some(handle.clone());
         handle
+    }
+}
+
+impl Drop for BaseWidget {
+    fn drop(&mut self) {
+        if let Some(source_id) = self._show_if_timer.take() {
+            source_id.remove();
+        }
     }
 }
