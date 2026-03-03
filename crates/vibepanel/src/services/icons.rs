@@ -23,13 +23,15 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
+use std::time::Duration;
 
 use gtk4::gio::{AppInfo, DesktopAppInfo, prelude::*};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{IconTheme, Image, Label};
+use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use pango::prelude::FontMapExt;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::styles::icon;
 
@@ -1648,6 +1650,9 @@ pub struct IconsService {
     handles: RefCell<Vec<Weak<IconHandleInner>>>,
     /// CSS provider for Material Symbols (stored for replacement on weight change).
     material_css_provider: RefCell<Option<gtk4::CssProvider>>,
+    /// Cached path to the Material Symbols font file (for re-registration after
+    /// Pango font map resets triggered by system font changes).
+    font_path: RefCell<Option<PathBuf>>,
 }
 
 impl IconsService {
@@ -1661,6 +1666,7 @@ impl IconsService {
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
+            font_path: RefCell::new(None),
         });
 
         IconsService::setup_backends(&service, &theme);
@@ -1696,6 +1702,9 @@ impl IconsService {
             debug!("No display available; GTK icon backend will use fallback");
             *service.icon_theme.borrow_mut() = None;
         }
+
+        // Started unconditionally — supports live theme switching via reconfigure().
+        Self::start_font_dir_watcher();
 
         // Initialize Material if configured
         if is_material_theme(theme) {
@@ -1921,6 +1930,8 @@ impl IconsService {
             false
         };
 
+        *self.font_path.borrow_mut() = font_path;
+
         if !font_registered {
             // Font not registered - icons will render as text
             // Still mark as ready so we at least try to use the font CSS
@@ -1967,6 +1978,151 @@ impl IconsService {
             "Material Symbols CSS loaded (font_registered={}, weight={})",
             font_registered, weight
         );
+    }
+
+    /// Re-register the Material Symbols font with Pango using the cached
+    /// path, falling back to `find_font_path()` if the cached file is gone.
+    fn re_register_font(&self) {
+        let path = self.font_path.borrow().clone();
+        let path = match path {
+            Some(p) if p.exists() => p,
+            _ => {
+                // Cached path is missing or stale; re-locate the font
+                match Self::find_font_path() {
+                    Some(p) => {
+                        *self.font_path.borrow_mut() = Some(p.clone());
+                        p
+                    }
+                    None => {
+                        warn!("Cannot find Material Symbols font for re-registration");
+                        return;
+                    }
+                }
+            }
+        };
+
+        if register_font_with_pango(&path) {
+            debug!(
+                "Re-registered Material Symbols font after fontconfig change: {}",
+                path.display()
+            );
+        } else {
+            warn!(
+                "Failed to re-register Material Symbols font: {}",
+                path.display()
+            );
+        }
+    }
+
+    /// Watch system font directories and re-register our embedded Material
+    /// Symbols font with Pango when changes are detected.
+    ///
+    /// Follows the `notify-debouncer-mini` pattern from `ConfigManager`.
+    /// No shutdown flag — `IconsService` is a process-lifetime singleton.
+    fn start_font_dir_watcher() {
+        // Guard against multiple calls (e.g. future refactoring of setup_backends).
+        thread_local! {
+            static WATCHER_STARTED: Cell<bool> = const { Cell::new(false) };
+        }
+        let already_started = WATCHER_STARTED.with(|started| {
+            if started.get() {
+                return true;
+            }
+            started.set(true);
+            false
+        });
+        if already_started {
+            return;
+        }
+
+        const FONT_DIR_DEBOUNCE_MS: u64 = 1500;
+
+        let mut dirs: Vec<PathBuf> = Vec::new();
+
+        for system_dir in &["/usr/share/fonts", "/usr/local/share/fonts"] {
+            let p = PathBuf::from(system_dir);
+            if p.is_dir() {
+                dirs.push(p);
+            } else {
+                debug!("Font watcher: skipping {} (does not exist)", system_dir);
+            }
+        }
+
+        // User font directory: $XDG_DATA_HOME/fonts or ~/.local/share/fonts
+        if let Some(user_font_dir) = std::env::var("XDG_DATA_HOME")
+            .ok()
+            .map(|d| PathBuf::from(d).join("fonts"))
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".local/share/fonts"))
+            })
+        {
+            if user_font_dir.is_dir() {
+                dirs.push(user_font_dir);
+            } else {
+                debug!(
+                    "Font watcher: skipping {} (does not exist)",
+                    user_font_dir.display()
+                );
+            }
+        }
+
+        if dirs.is_empty() {
+            warn!("Font watcher: no font directories found to watch");
+            return;
+        }
+
+        info!(
+            "Starting font directory watcher for: {:?}",
+            dirs.iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+        );
+
+        std::thread::spawn(move || {
+            let debounce_duration = Duration::from_millis(FONT_DIR_DEBOUNCE_MS);
+
+            let mut debouncer =
+                match new_debouncer(debounce_duration, move |res: DebounceEventResult| {
+                    match res {
+                        Ok(_events) => {
+                            debug!(
+                                "Font directory change detected, scheduling font re-registration"
+                            );
+                            // add_font_file() doesn't deduplicate, but duplicates
+                            // are harmless and font dir changes are rare.
+                            glib::idle_add_once(|| {
+                                let svc = IconsService::global();
+                                if svc.uses_material() {
+                                    svc.re_register_font();
+                                    svc.reapply_all_icons();
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            error!("Font directory watcher error: {}", err);
+                        }
+                    }
+                }) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        error!("Failed to create font directory watcher: {}", e);
+                        return;
+                    }
+                };
+
+            for dir in &dirs {
+                if let Err(e) = debouncer.watcher().watch(dir, RecursiveMode::Recursive) {
+                    warn!("Failed to watch font directory {}: {}", dir.display(), e);
+                }
+            }
+
+            // Keep the thread (and debouncer) alive indefinitely.
+            loop {
+                std::thread::park();
+            }
+        });
     }
 
     /// Try to find the Material Symbols font file.
@@ -2291,6 +2447,7 @@ mod tests {
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
+            font_path: RefCell::new(None),
         };
         assert!(service.uses_material());
 
@@ -2302,6 +2459,7 @@ mod tests {
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
+            font_path: RefCell::new(None),
         };
         assert!(!service2.uses_material());
     }
@@ -2323,6 +2481,7 @@ mod tests {
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
+            font_path: RefCell::new(None),
         };
         assert_eq!(service.current_backend_kind(), IconBackendKind::Material);
     }
@@ -2339,6 +2498,7 @@ mod tests {
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
+            font_path: RefCell::new(None),
         };
         assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
     }
@@ -2354,6 +2514,7 @@ mod tests {
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
+            font_path: RefCell::new(None),
         };
         assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
     }
@@ -2369,6 +2530,7 @@ mod tests {
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
+            font_path: RefCell::new(None),
         };
 
         assert_eq!(service.theme(), "material");
@@ -2395,6 +2557,7 @@ mod tests {
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
+            font_path: RefCell::new(None),
         };
 
         // This should not change anything
