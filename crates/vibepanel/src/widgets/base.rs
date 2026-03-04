@@ -4,9 +4,11 @@
 //! common CSS classes and helpers for labels, icons, and tooltips.
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, Popover, PositionType};
+use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, Popover, PositionType, gdk};
 use std::cell::{Cell, RefCell};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::config_manager::ConfigManager;
@@ -14,7 +16,12 @@ use crate::services::icons::{IconHandle, IconsService};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, state, surface};
 use crate::widgets::layer_shell_popover::{Dismissible, LayerShellPopover};
-use tracing::debug;
+use gtk4::gio;
+use gtk4::glib;
+use tracing::{debug, info, warn};
+
+/// Timeout for `show_if` commands in seconds.
+const SHOW_IF_TIMEOUT_SECS: u64 = 5;
 
 /// Configure a GTK popover with standard settings.
 ///
@@ -216,6 +223,69 @@ impl Dismissible for MenuHandle {
     }
 }
 
+/// Describe a process exit status in human-readable form.
+///
+/// Translates well-known shell exit codes (127 = command not found,
+/// 126 = permission denied) into actionable messages.
+pub(super) fn describe_exit_status(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(127) => "command not found".to_string(),
+        Some(126) => "permission denied (not executable)".to_string(),
+        Some(code) => format!("exit code {code}"),
+        None => {
+            use std::os::unix::process::ExitStatusExt;
+            match status.signal() {
+                Some(sig) => format!("killed by signal {sig}"),
+                None => "unknown exit status".to_string(),
+            }
+        }
+    }
+}
+
+/// Spawn a shell command, reaping the child process in a background thread.
+fn spawn_click_command(widget_name: &str, cmd: &str) {
+    match Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            let widget_name = widget_name.to_string();
+            let cmd = cmd.to_string();
+            // Reap the child in a background thread to avoid zombie processes
+            std::thread::spawn(move || match child.wait() {
+                Ok(status) if !status.success() => {
+                    tracing::warn!(
+                        "'{}' click command '{}' failed: {}",
+                        widget_name,
+                        cmd,
+                        describe_exit_status(status)
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "'{}' click command '{}' wait failed: {}",
+                        widget_name,
+                        cmd,
+                        e
+                    );
+                }
+                _ => {}
+            });
+        }
+        Err(e) => {
+            tracing::warn!(
+                "'{}' failed to spawn click command '{}': {}",
+                widget_name,
+                cmd,
+                e
+            );
+        }
+    }
+}
+
 /// Shared base widget container.
 ///
 /// Each widget owns a `BaseWidget` instance and exposes the underlying
@@ -232,6 +302,7 @@ pub struct BaseWidget {
     /// Widget name for CSS class-based styling of popovers (e.g., "clock")
     widget_name: String,
     _gesture_click: GestureClick,
+    _show_if_timer: Option<glib::SourceId>,
 }
 
 impl BaseWidget {
@@ -272,9 +343,20 @@ impl BaseWidget {
 
         let menu: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
 
+        let (on_click_right, on_click_middle) =
+            ConfigManager::global().get_click_handlers(&widget_name);
+
+        let has_click_handler = on_click_right.is_some() || on_click_middle.is_some();
+        if has_click_handler {
+            container.add_css_class(state::CLICKABLE);
+        }
+
         let gesture_click = GestureClick::new();
+        // Receive all mouse buttons so we can handle right-click and middle-click
+        gesture_click.set_button(0);
         {
             let menu_for_cb = menu.clone();
+            let widget_name_for_cb = widget_name.clone();
             // Use connect_released for immediate response without double-click detection delay
             gesture_click.connect_released(move |gesture, n_press, x, y| {
                 debug!(
@@ -293,47 +375,65 @@ impl BaseWidget {
                     let mut current: Option<gtk4::Widget> = Some(target);
                     while let Some(w) = current {
                         if w.downcast_ref::<gtk4::Button>().is_some() {
-                            debug!("BaseWidget click: target is a Button, skipping popover toggle");
+                            debug!("BaseWidget click: target is a Button, skipping");
                             return;
                         }
                         current = w.parent();
                     }
                 }
 
+                let button = gesture.current_button();
+
                 // Process every click regardless of n_press count
                 // (we don't use double-click, so treat them all as single clicks)
-                if gesture.current_button() == 1 {
-                    // Check if our own menu is visible before dismissing
-                    let my_menu_was_visible = menu_for_cb
-                        .borrow()
-                        .as_ref()
-                        .map(|m| m.is_visible())
-                        .unwrap_or(false);
+                match button {
+                    gdk::BUTTON_PRIMARY => {
+                        let my_menu_was_visible = menu_for_cb
+                            .borrow()
+                            .as_ref()
+                            .map(|m| m.is_visible())
+                            .unwrap_or(false);
 
-                    // Cancel any pending or visible tooltips to prevent them from
-                    // appearing after the click
-                    TooltipManager::global().cancel_and_hide();
+                        // Cancel any pending or visible tooltips to prevent them from
+                        // appearing after the click
+                        TooltipManager::global().cancel_and_hide();
 
-                    // Dismiss any active popup (enables seamless transitions)
-                    PopoverTracker::global().dismiss_active();
+                        // Dismiss any active popup (enables seamless transitions)
+                        PopoverTracker::global().dismiss_active();
 
-                    if let Some(ref menu) = *menu_for_cb.borrow() {
-                        // If our menu was already open, we just closed it - don't re-open
-                        // If it wasn't open, open it now
-                        if !my_menu_was_visible {
-                            debug!("Opening menu from BaseWidget click");
-                            menu.show();
+                        if let Some(ref menu) = *menu_for_cb.borrow() {
+                            // If our menu was already open, we just closed it - don't re-open
+                            // If it wasn't open, open it now
+                            if !my_menu_was_visible {
+                                debug!("Opening menu from BaseWidget click");
+                                menu.show();
+                            } else {
+                                debug!("Closed own menu from BaseWidget click");
+                            }
                         } else {
-                            debug!("Closed own menu from BaseWidget click");
+                            debug!("BaseWidget click: no menu registered");
                         }
-                    } else {
-                        debug!("BaseWidget click: no menu registered");
                     }
+                    gdk::BUTTON_MIDDLE => {
+                        if let Some(ref cmd) = on_click_middle {
+                            debug!("BaseWidget middle-click: sh -c {}", cmd);
+                            spawn_click_command(&widget_name_for_cb, cmd);
+                        }
+                    }
+                    gdk::BUTTON_SECONDARY => {
+                        if let Some(ref cmd) = on_click_right {
+                            debug!("BaseWidget right-click: sh -c {}", cmd);
+                            spawn_click_command(&widget_name_for_cb, cmd);
+                        }
+                    }
+                    _ => {}
                 }
             });
         }
 
         container.add_controller(gesture_click.clone());
+
+        let show_if_timer = Self::setup_show_if_timer(&widget_name, &container);
 
         Self {
             container,
@@ -341,7 +441,212 @@ impl BaseWidget {
             menu,
             widget_name,
             _gesture_click: gesture_click,
+            _show_if_timer: show_if_timer,
         }
+    }
+
+    /// Set up async `show_if` evaluation if configured.
+    ///
+    /// Widget starts hidden and the first check runs asynchronously in the
+    /// background. When the result arrives, visibility is updated. If
+    /// `show_if_interval` is set (and > 0), a periodic timer continues
+    /// re-evaluating after the first check. Commands that exceed
+    /// `SHOW_IF_TIMEOUT_SECS` are killed and treated as "hide".
+    fn setup_show_if_timer(widget_name: &str, container: &GtkBox) -> Option<glib::SourceId> {
+        let (show_if, interval) = ConfigManager::global().get_show_if(widget_name);
+
+        let cmd = show_if?;
+
+        // Start hidden; async evaluation will show the widget if appropriate.
+        container.set_visible(false);
+
+        let has_interval = interval.filter(|&i| i > 0).is_some();
+        let prev_visible = Rc::new(Cell::new(false));
+        let container_clone = container.clone();
+        let name = widget_name.to_string();
+
+        // Run initial check asynchronously
+        {
+            let cmd = cmd.clone();
+            let container = container_clone.clone();
+            let name = name.clone();
+            let prev_visible = prev_visible.clone();
+
+            glib::spawn_future_local(async move {
+                let cmd_for_retry = cmd.clone();
+                let result =
+                    gio::spawn_blocking(move || Self::run_show_if_command_with_timeout(&cmd)).await;
+
+                let (visible, stderr) = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(widget = %name, error = ?e, "show_if spawn_blocking failed");
+                        (false, String::new())
+                    }
+                };
+
+                container.set_visible(visible);
+                debug!(
+                    widget = %name,
+                    visible,
+                    stderr = %stderr.trim(),
+                    "show_if initial check"
+                );
+                prev_visible.set(visible);
+
+                // If hidden and no periodic interval, schedule a single retry
+                // after 500ms. This handles race conditions where the data source
+                // (e.g., compositor IPC) isn't fully ready when bars are recreated
+                // on monitor hotplug. The retry is one-directional: it can only
+                // transition hidden → visible.
+                if !visible && !has_interval {
+                    let container = container.clone();
+                    let name = name.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                        glib::spawn_future_local(async move {
+                            let result = gio::spawn_blocking(move || {
+                                Self::run_show_if_command_with_timeout(&cmd_for_retry)
+                            })
+                            .await;
+
+                            let (visible, _stderr) = match result {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(
+                                        widget = %name,
+                                        error = ?e,
+                                        "show_if retry spawn_blocking failed"
+                                    );
+                                    (false, String::new())
+                                }
+                            };
+
+                            if visible {
+                                container.set_visible(true);
+                                debug!(widget = %name, "show_if retry: now visible");
+                            }
+                        });
+                    });
+                }
+            });
+        }
+
+        // If an interval is configured, start a periodic timer for subsequent checks
+        let interval = interval.filter(|&i| i > 0)?;
+
+        let source_id =
+            glib::timeout_add_seconds_local(interval.min(u32::MAX as u64) as u32, move || {
+                let cmd = cmd.clone();
+                let container = container_clone.clone();
+                let name = name.clone();
+                let prev_visible = prev_visible.clone();
+
+                glib::spawn_future_local(async move {
+                    let result =
+                        gio::spawn_blocking(move || Self::run_show_if_command_with_timeout(&cmd))
+                            .await;
+
+                    let (visible, stderr) = match result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(widget = %name, error = ?e, "show_if spawn_blocking failed");
+                            (false, String::new())
+                        }
+                    };
+
+                    if visible != prev_visible.get() {
+                        container.set_visible(visible);
+                        info!(
+                            widget = %name,
+                            visible,
+                            stderr = %stderr.trim(),
+                            "show_if visibility changed"
+                        );
+                        prev_visible.set(visible);
+                    }
+                });
+
+                glib::ControlFlow::Continue
+            });
+
+        Some(source_id)
+    }
+
+    /// Cancel the periodic `show_if` timer, if any.
+    ///
+    /// Used by widgets that handle `show_if` themselves (e.g., custom widgets
+    /// piggyback on their exec polling cycle instead of running a separate timer).
+    pub(super) fn cancel_show_if_timer(&mut self) {
+        if let Some(source_id) = self._show_if_timer.take() {
+            source_id.remove();
+        }
+    }
+
+    /// Run a `show_if` shell command synchronously with a timeout.
+    /// Returns `(visible, stderr)` where visible = exit 0.
+    /// Commands exceeding `SHOW_IF_TIMEOUT_SECS` are killed and treated as hidden.
+    pub(super) fn run_show_if_command_with_timeout(cmd: &str) -> (bool, String) {
+        let mut child = match Command::new("sh")
+            .args(["-c", cmd])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => return (false, String::new()),
+        };
+
+        let pid = child.id() as libc::pid_t;
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        std::thread::spawn(move || {
+            if rx
+                .recv_timeout(Duration::from_secs(SHOW_IF_TIMEOUT_SECS))
+                .is_err()
+            {
+                // Timeout expired — kill the child.
+                // SAFETY: Sending SIGKILL to a process. If the process already
+                // exited and was reaped, kill() returns ESRCH which is harmless.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        });
+
+        let status = child.wait();
+
+        // Cancel the watchdog (no-op if it already fired).
+        let _ = tx.send(());
+
+        match status {
+            Ok(s) => {
+                use std::os::unix::process::ExitStatusExt;
+                if !s.success() && s.signal() == Some(libc::SIGKILL) {
+                    warn!(
+                        cmd,
+                        "show_if command timed out after {SHOW_IF_TIMEOUT_SECS}s"
+                    );
+                    return (false, String::new());
+                }
+                (s.success(), String::new())
+            }
+            Err(_) => (false, String::new()),
+        }
+    }
+
+    /// Run a `show_if` shell command synchronously (no timeout).
+    /// Returns `(visible, stderr)` where visible = exit 0.
+    pub(super) fn run_show_if_command(cmd: &str) -> (bool, String) {
+        Command::new("sh")
+            .args(["-c", cmd])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .output()
+            .map(|o| {
+                let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+                (o.status.success(), stderr)
+            })
+            .unwrap_or((false, String::new()))
     }
 
     /// Get the root GTK container for this widget.
@@ -421,5 +726,13 @@ impl BaseWidget {
         let handle = MenuHandle::new(self.widget_name.clone(), builder, self.container.clone());
         *self.menu.borrow_mut() = Some(handle.clone());
         handle
+    }
+}
+
+impl Drop for BaseWidget {
+    fn drop(&mut self) {
+        if let Some(source_id) = self._show_if_timer.take() {
+            source_id.remove();
+        }
     }
 }

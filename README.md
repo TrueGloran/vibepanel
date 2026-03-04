@@ -4,7 +4,7 @@
   <img src="assets/screenshots/islands_bar_light.png" alt="VibePanel bar preview" width="830">
 </p>
 
-A GTK4 panel for Wayland with integrated notifications, OSD, and quick settings. Supports Hyprland, Niri, MangoWC and DWL.
+A GTK4 panel for Wayland with built-in notifications, OSD, and quick settings in a single binary. Supports [Hyprland](https://github.com/hyprwm/Hyprland), [Niri](https://github.com/niri-wm/niri), [Sway](https://github.com/swaywm/sway), [MangoWC](https://github.com/mangowm/mango) and more.
 
 ## Why VibePanel?
 
@@ -70,6 +70,16 @@ These examples use roughly ~10–35 lines of TOML to get completely different vi
    sudo dnf install vibepanel
    ```
 
+   **Nix:**
+
+   ```sh
+   # Try it
+   nix run github:prankstr/vibepanel
+
+   # Install
+   nix profile install github:prankstr/vibepanel
+   ```
+
    **Other distros:** Install [runtime dependencies](https://github.com/prankstr/vibepanel/wiki/Installation#runtime-dependencies), then:
 
    ```sh
@@ -130,7 +140,7 @@ If you find a bug or if you're missing a feature, please [open an issue](https:/
 
 ### Compatibility
 
-- **Compositors:** Hyprland, Niri, MangoWC/DWL. Sway support may be added based on demand.
+- **Compositors:** [Hyprland](https://github.com/hyprwm/Hyprland), [Niri](https://github.com/niri-wm/niri), [Sway](https://github.com/swaywm/sway), [Miracle WM](https://github.com/miracle-wm-org/miracle-wm), [Scroll](https://github.com/dawsers/scroll), and other i3-IPC compatible compositors. [MangoWC](https://github.com/mangowm/mango)/[DWL](https://codeberg.org/dwl/dwl) via dwl-ipc.
 - **Updates widget:** dnf, pacman/paru, and flatpak.
 
 ## Documentation

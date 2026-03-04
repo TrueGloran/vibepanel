@@ -325,6 +325,15 @@ impl Config {
             }
         }
 
+        for (name, opts) in &self.widgets.widget_configs {
+            if opts.show_if_interval.is_some() && opts.show_if.is_none() {
+                warnings.push(format!(
+                    "widgets.{}: show_if_interval has no effect without show_if",
+                    name
+                ));
+            }
+        }
+
         warnings
     }
 
@@ -573,16 +582,27 @@ impl Default for WidgetsConfig {
 impl WidgetsConfig {
     /// Check if a widget is disabled via its `[widgets.<name>]` config.
     pub fn is_disabled(&self, name: &str) -> bool {
-        self.widget_configs
-            .get(name)
+        self.get_options(name)
             .map(|opts| opts.disabled)
             .unwrap_or(false)
     }
 
     /// Get widget options for a given widget name.
     /// Returns None if no `[widgets.<name>]` section exists.
+    ///
+    /// Normalizes hyphens to underscores so CSS class names (e.g. "quick-settings")
+    /// resolve to TOML config keys (e.g. "quick_settings").
     pub fn get_options(&self, name: &str) -> Option<&WidgetOptions> {
-        self.widget_configs.get(name)
+        // Fast path: try exact match first (most names have no hyphens)
+        if let Some(opts) = self.widget_configs.get(name) {
+            return Some(opts);
+        }
+        // Fallback: normalize hyphens to underscores for CSS-class lookups
+        if name.contains('-') {
+            let normalized = name.replace('-', "_");
+            return self.widget_configs.get(&normalized);
+        }
+        None
     }
 
     /// Parse inline argument from widget name.
@@ -847,6 +867,28 @@ pub struct WidgetOptions {
     /// If invalid or not set, uses the theme's default widget background.
     #[serde(default)]
     pub background_color: Option<String>,
+
+    /// Shell command to execute on right-click. Runs via `sh -c`.
+    #[serde(default)]
+    pub on_click_right: Option<String>,
+
+    /// Shell command to execute on middle-click. Runs via `sh -c`.
+    #[serde(default)]
+    pub on_click_middle: Option<String>,
+
+    /// Shell command that controls widget visibility. Runs via `sh -c`.
+    /// Exit 0 = show, non-zero or failure = hide. Unset = always show.
+    /// Evaluated asynchronously — the widget starts hidden and appears when
+    /// the command succeeds. Not supported on spacer widgets.
+    #[serde(default)]
+    pub show_if: Option<String>,
+
+    /// Interval in seconds to re-evaluate `show_if`. Requires `show_if` to be set.
+    /// If unset (or zero), `show_if` is checked once at bar creation.
+    /// When set, the widget's visibility is toggled periodically based on the
+    /// `show_if` command's exit status.
+    #[serde(default)]
+    pub show_if_interval: Option<u64>,
 
     /// Widget-specific options (format, show_icon, etc.).
     #[serde(flatten)]
@@ -1624,6 +1666,28 @@ mod tests {
     }
 
     #[test]
+    fn test_get_options_normalizes_hyphens() {
+        let toml = r#"
+            [widgets]
+            left = ["quick_settings"]
+
+            [widgets.quick_settings]
+            on_click_right = "notify-send hello"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+
+        // Exact match (underscore key)
+        assert!(config.widgets.get_options("quick_settings").is_some());
+
+        // Hyphenated CSS class name resolves to underscore config key
+        assert!(config.widgets.get_options("quick-settings").is_some());
+
+        // Non-existent widget still returns None
+        assert!(config.widgets.get_options("nonexistent").is_none());
+    }
+
+    #[test]
     fn test_widget_count_helper() {
         let single = WidgetPlacement::Single("clock".to_string());
         assert_eq!(single.widget_count(), 1);
@@ -1856,5 +1920,252 @@ mod tests {
 
         assert_eq!(entry.name, "spacer");
         assert!(!entry.options.contains_key("width"));
+    }
+
+    #[test]
+    fn test_widget_options_click_handlers_parsed() {
+        let toml_str = r#"
+            on_click_right = "notify-send hello"
+            on_click_middle = "xdg-open https://example.com"
+            format = "%H:%M"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(opts.on_click_right, Some("notify-send hello".to_string()));
+        assert_eq!(
+            opts.on_click_middle,
+            Some("xdg-open https://example.com".to_string())
+        );
+        // Widget-specific options end up in the HashMap
+        assert_eq!(
+            opts.options.get("format"),
+            Some(&toml::Value::String("%H:%M".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_widget_options_click_handlers_not_in_options_map() {
+        let toml_str = r#"
+            on_click_right = "notify-send hello"
+            on_click_middle = "xdg-open https://example.com"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        // Click handler fields should NOT leak into the options HashMap
+        assert!(!opts.options.contains_key("on_click_right"));
+        assert!(!opts.options.contains_key("on_click_middle"));
+    }
+
+    #[test]
+    fn test_widget_options_click_handlers_default_to_none() {
+        let toml_str = r#"
+            format = "%H:%M"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(opts.on_click_right.is_none());
+        assert!(opts.on_click_middle.is_none());
+    }
+
+    #[test]
+    fn test_widget_options_click_handlers_not_in_widget_entry() {
+        // Verify click handlers don't leak into WidgetEntry.options
+        let opts = WidgetOptions {
+            on_click_right: Some("notify-send hello".to_string()),
+            on_click_middle: Some("xdg-open https://example.com".to_string()),
+            ..Default::default()
+        };
+
+        let entry = WidgetEntry::with_options("clock", &opts);
+        assert!(!entry.options.contains_key("on_click_right"));
+        assert!(!entry.options.contains_key("on_click_middle"));
+    }
+
+    #[test]
+    fn test_show_if_parsed_on_widget_options() {
+        let toml_str = r#"
+            show_if = "command -v foo"
+            format = "%H:%M"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(opts.show_if, Some("command -v foo".to_string()));
+    }
+
+    #[test]
+    fn test_show_if_defaults_to_none() {
+        let toml_str = r#"
+            format = "%H:%M"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(opts.show_if.is_none());
+    }
+
+    #[test]
+    fn test_show_if_not_in_options_map() {
+        let toml_str = r#"
+            show_if = "command -v foo"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(!opts.options.contains_key("show_if"));
+    }
+
+    #[test]
+    fn test_show_if_not_in_widget_entry() {
+        let opts = WidgetOptions {
+            show_if: Some("true".to_string()),
+            ..Default::default()
+        };
+
+        let entry = WidgetEntry::with_options("clock", &opts);
+        assert!(!entry.options.contains_key("show_if"));
+    }
+
+    #[test]
+    fn test_show_if_disabled_takes_precedence() {
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("clock");
+        assert!(entry.is_none());
+    }
+
+    // --- Phase 2: show_if_interval tests ---
+
+    #[test]
+    fn test_show_if_interval_parsed_on_widget_options() {
+        let toml_str = r#"
+            show_if = "command -v foo"
+            show_if_interval = 30
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(opts.show_if_interval, Some(30));
+    }
+
+    #[test]
+    fn test_show_if_interval_defaults_to_none() {
+        let toml_str = r#"
+            show_if = "true"
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(opts.show_if_interval.is_none());
+    }
+
+    #[test]
+    fn test_show_if_interval_not_in_options_map() {
+        let toml_str = r#"
+            show_if = "true"
+            show_if_interval = 10
+        "#;
+        let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
+
+        assert!(!opts.options.contains_key("show_if_interval"));
+    }
+
+    #[test]
+    fn test_show_if_interval_not_in_widget_entry() {
+        let opts = WidgetOptions {
+            show_if: Some("true".to_string()),
+            show_if_interval: Some(5),
+            ..Default::default()
+        };
+
+        let entry = WidgetEntry::with_options("clock", &opts);
+        assert!(!entry.options.contains_key("show_if_interval"));
+    }
+
+    #[test]
+    fn test_warning_show_if_interval_without_show_if() {
+        let toml = r#"
+            [widgets]
+            right = ["clock"]
+
+            [widgets.clock]
+            show_if_interval = 30
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let warnings = config.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("show_if_interval") && w.contains("clock")),
+            "expected warning about show_if_interval without show_if, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_no_warning_show_if_interval_with_show_if() {
+        let toml = r#"
+            [widgets]
+            right = ["clock"]
+
+            [widgets.clock]
+            show_if = "true"
+            show_if_interval = 30
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let warnings = config.warnings();
+        assert!(
+            !warnings.iter().any(|w| w.contains("show_if_interval")),
+            "unexpected show_if_interval warning when show_if is set: {:?}",
+            warnings
+        );
+    }
+
+    // --- Custom widget show_if config tests ---
+
+    #[test]
+    fn test_show_if_on_custom_widget_parsed() {
+        let toml = r#"
+            [widgets]
+            right = ["custom-power"]
+
+            [widgets.custom-power]
+            icon = "system-shutdown-symbolic"
+            show_if = "command -v wlogout"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let opts = config.widgets.get_options("custom-power").unwrap();
+        assert_eq!(opts.show_if, Some("command -v wlogout".to_string()));
+    }
+
+    #[test]
+    fn test_show_if_with_interval_on_custom_widget() {
+        let toml = r#"
+            [widgets]
+            right = ["custom-weather"]
+
+            [widgets.custom-weather]
+            exec = "curl -s wttr.in"
+            interval = 600
+            show_if = "ping -c1 -W1 1.1.1.1"
+            show_if_interval = 60
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let opts = config.widgets.get_options("custom-weather").unwrap();
+        assert_eq!(opts.show_if, Some("ping -c1 -W1 1.1.1.1".to_string()));
+        assert_eq!(opts.show_if_interval, Some(60));
+        // show_if_interval without show_if warning should NOT fire here
+        let warnings = config.warnings();
+        assert!(
+            !warnings.iter().any(|w| w.contains("show_if_interval")),
+            "unexpected warning: {:?}",
+            warnings
+        );
     }
 }
